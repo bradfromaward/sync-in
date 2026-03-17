@@ -1,0 +1,27 @@
+services:
+  - type: web
+    name: sync-in
+    runtime: node
+    plan: free
+    autoDeploy: true
+    buildCommand: npm ci && npm run build
+    startCommand: npm run setup && npm run start
+    envVars:
+      - key: NODE_ENV
+        value: production
+      - key: SHOPIFY_API_KEY
+        sync: false
+      - key: SHOPIFY_API_SECRET
+        sync: false
+      - key: SHOPIFY_APP_URL
+        sync: false
+      - key: SCOPES
+        value: write_metaobject_definitions,write_metaobjects,write_products
+      - key: DATABASE_URL
+        fromDatabase:
+          name: sync-in-db
+          property: connectionString
+
+databases:
+  - name: sync-in-db
+    plan: free
