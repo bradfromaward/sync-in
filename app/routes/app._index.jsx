@@ -93,9 +93,14 @@ export const loader = async ({ request }) => {
             }
             variants(first: 1) {
               nodes {
+                id
                 sku
                 barcode
                 inventoryPolicy
+                inventoryItem {
+                  id
+                  sku
+                }
               }
             }
           }
@@ -235,9 +240,14 @@ export const action = async ({ request }) => {
             }
             variants(first: 1) {
               nodes {
+                id
                 sku
                 barcode
                 inventoryPolicy
+                inventoryItem {
+                  id
+                  sku
+                }
               }
             }
           }
@@ -309,6 +319,9 @@ export const action = async ({ request }) => {
                 variants(first: 1) {
                   nodes {
                     id
+                  inventoryItem {
+                    id
+                  }
                   }
                 }
               }
@@ -335,7 +348,9 @@ export const action = async ({ request }) => {
 
       const syncedProduct = createProductJson.data?.productCreate?.product;
       createdShops.push(targetShop);
-      const targetVariantId = syncedProduct?.variants?.nodes?.[0]?.id;
+      const targetVariant = syncedProduct?.variants?.nodes?.[0];
+      const targetVariantId = targetVariant?.id;
+      const targetInventoryItemId = targetVariant?.inventoryItem?.id;
       const shouldSyncVariantFields =
         selectedFields.has("sku") ||
         selectedFields.has("barcode") ||
@@ -345,11 +360,6 @@ export const action = async ({ request }) => {
         const variantUpdateInput = {
           id: targetVariantId,
         };
-        const inventoryItemInput = {};
-
-        if (selectedFields.has("sku") && sourceVariant.sku) {
-          inventoryItemInput.sku = sourceVariant.sku;
-        }
 
         if (selectedFields.has("barcode") && sourceVariant.barcode) {
           variantUpdateInput.barcode = sourceVariant.barcode;
@@ -358,10 +368,6 @@ export const action = async ({ request }) => {
         if (selectedFields.has("continue-selling-out-of-stock")) {
           variantUpdateInput.inventoryPolicy =
             sourceVariant.inventoryPolicy === "CONTINUE" ? "CONTINUE" : "DENY";
-        }
-
-        if (Object.keys(inventoryItemInput).length > 0) {
-          variantUpdateInput.inventoryItem = inventoryItemInput;
         }
 
         if (Object.keys(variantUpdateInput).length > 1) {
@@ -393,6 +399,43 @@ export const action = async ({ request }) => {
           } catch (error) {
             variantWarningShops.push(
               `${targetShop} (variant fields update failed: ${error?.message || "unknown error"})`,
+            );
+          }
+        }
+
+        if (selectedFields.has("sku") && sourceVariant.sku && targetInventoryItemId) {
+          try {
+            const updateInventoryItemResponse = await targetAdmin.graphql(
+              `#graphql
+                mutation UpdateInventoryItemSku($id: ID!, $input: InventoryItemInput!) {
+                  inventoryItemUpdate(id: $id, input: $input) {
+                    userErrors {
+                      field
+                      message
+                    }
+                  }
+                }`,
+              {
+                variables: {
+                  id: targetInventoryItemId,
+                  input: {
+                    sku: sourceVariant.sku,
+                  },
+                },
+              },
+            );
+            const updateInventoryItemJson = await updateInventoryItemResponse.json();
+            const inventoryItemErrors =
+              updateInventoryItemJson.data?.inventoryItemUpdate?.userErrors ?? [];
+
+            if (inventoryItemErrors.length > 0) {
+              variantWarningShops.push(
+                `${targetShop} (SKU update failed: ${inventoryItemErrors[0].message})`,
+              );
+            }
+          } catch (error) {
+            variantWarningShops.push(
+              `${targetShop} (SKU update failed: ${error?.message || "unknown error"})`,
             );
           }
         }
