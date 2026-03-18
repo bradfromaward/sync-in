@@ -345,9 +345,10 @@ export const action = async ({ request }) => {
         const variantUpdateInput = {
           id: targetVariantId,
         };
+        const inventoryItemInput = {};
 
         if (selectedFields.has("sku") && sourceVariant.sku) {
-          variantUpdateInput.sku = sourceVariant.sku;
+          inventoryItemInput.sku = sourceVariant.sku;
         }
 
         if (selectedFields.has("barcode") && sourceVariant.barcode) {
@@ -359,30 +360,40 @@ export const action = async ({ request }) => {
             sourceVariant.inventoryPolicy === "CONTINUE" ? "CONTINUE" : "DENY";
         }
 
-        if (Object.keys(variantUpdateInput).length > 1) {
-          const updateVariantResponse = await targetAdmin.graphql(
-            `#graphql
-              mutation UpdateSyncedVariant($productId: ID!, $variants: [ProductVariantsBulkInput!]!) {
-                productVariantsBulkUpdate(productId: $productId, variants: $variants) {
-                  userErrors {
-                    field
-                    message
-                  }
-                }
-              }`,
-            {
-              variables: {
-                productId: syncedProduct.id,
-                variants: [variantUpdateInput],
-              },
-            },
-          );
-          const updateVariantJson = await updateVariantResponse.json();
-          const variantErrors =
-            updateVariantJson.data?.productVariantsBulkUpdate?.userErrors ?? [];
+        if (Object.keys(inventoryItemInput).length > 0) {
+          variantUpdateInput.inventoryItem = inventoryItemInput;
+        }
 
-          if (variantErrors.length > 0) {
-            variantWarningShops.push(`${targetShop} (${variantErrors[0].message})`);
+        if (Object.keys(variantUpdateInput).length > 1) {
+          try {
+            const updateVariantResponse = await targetAdmin.graphql(
+              `#graphql
+                mutation UpdateSyncedVariant($productId: ID!, $variants: [ProductVariantsBulkInput!]!) {
+                  productVariantsBulkUpdate(productId: $productId, variants: $variants) {
+                    userErrors {
+                      field
+                      message
+                    }
+                  }
+                }`,
+              {
+                variables: {
+                  productId: syncedProduct.id,
+                  variants: [variantUpdateInput],
+                },
+              },
+            );
+            const updateVariantJson = await updateVariantResponse.json();
+            const variantErrors =
+              updateVariantJson.data?.productVariantsBulkUpdate?.userErrors ?? [];
+
+            if (variantErrors.length > 0) {
+              variantWarningShops.push(`${targetShop} (${variantErrors[0].message})`);
+            }
+          } catch (error) {
+            variantWarningShops.push(
+              `${targetShop} (variant fields update failed: ${error?.message || "unknown error"})`,
+            );
           }
         }
       }
