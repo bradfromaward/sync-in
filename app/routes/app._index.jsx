@@ -362,22 +362,24 @@ export const action = async ({ request }) => {
         if (Object.keys(variantUpdateInput).length > 1) {
           const updateVariantResponse = await targetAdmin.graphql(
             `#graphql
-            mutation UpdateSyncedVariant($input: ProductVariantInput!) {
-              productVariantUpdate(input: $input) {
-                userErrors {
-                  field
-                  message
+              mutation UpdateSyncedVariant($productId: ID!, $variants: [ProductVariantsBulkInput!]!) {
+                productVariantsBulkUpdate(productId: $productId, variants: $variants) {
+                  userErrors {
+                    field
+                    message
+                  }
                 }
-              }
-            }`,
+              }`,
             {
               variables: {
-                input: variantUpdateInput,
+                productId: syncedProduct.id,
+                variants: [variantUpdateInput],
               },
             },
           );
           const updateVariantJson = await updateVariantResponse.json();
-          const variantErrors = updateVariantJson.data?.productVariantUpdate?.userErrors ?? [];
+          const variantErrors =
+            updateVariantJson.data?.productVariantsBulkUpdate?.userErrors ?? [];
 
           if (variantErrors.length > 0) {
             variantWarningShops.push(`${targetShop} (${variantErrors[0].message})`);
