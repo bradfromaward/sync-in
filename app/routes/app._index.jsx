@@ -185,13 +185,6 @@ export const action = async ({ request }) => {
       };
     }
 
-    if (!selectedFields.has("title")) {
-      return {
-        ok: false,
-        message: "Title is required when creating a synced product.",
-      };
-    }
-
     const savedSessions = await db.session.findMany({
       where: {
         isOnline: false,
@@ -299,11 +292,17 @@ export const action = async ({ request }) => {
         }))
       : [];
 
-    const createdShops = [];
     const updatedShops = [];
     const failedShops = [];
     const variantWarningShops = [];
     const sourceSku = (sourceVariant?.sku || "").trim();
+
+    if (!sourceSku) {
+      return {
+        ok: false,
+        message: "Source product has no SKU. SKU is required to match existing products.",
+      };
+    }
 
     for (const targetShop of targetShops) {
       const targetAdmin =
@@ -406,45 +405,8 @@ export const action = async ({ request }) => {
 
         updatedShops.push(targetShop);
       } else {
-        const createProductResponse = await targetAdmin.graphql(
-          `#graphql
-            mutation SyncProduct($product: ProductCreateInput!, $media: [CreateMediaInput!]) {
-              productCreate(product: $product, media: $media) {
-                product {
-                  id
-                  title
-                  status
-                  variants(first: 1) {
-                    nodes {
-                      id
-                    }
-                  }
-                }
-                userErrors {
-                  field
-                  message
-                }
-              }
-            }`,
-          {
-            variables: {
-              product: productInput,
-              media: mediaInput.length > 0 ? mediaInput : null,
-            },
-          },
-        );
-        const createProductJson = await createProductResponse.json();
-        const userErrors = createProductJson.data?.productCreate?.userErrors ?? [];
-
-        if (userErrors.length > 0) {
-          failedShops.push(`${targetShop} (${userErrors[0].message})`);
-          continue;
-        }
-
-        const syncedProduct = createProductJson.data?.productCreate?.product;
-        createdShops.push(targetShop);
-        targetProductId = syncedProduct?.id ?? null;
-        targetVariantId = syncedProduct?.variants?.nodes?.[0]?.id ?? null;
+        failedShops.push(`${targetShop} (no product found with SKU "${sourceSku}")`);
+        continue;
       }
 
       const shouldSyncVariantFields =
@@ -527,7 +489,7 @@ export const action = async ({ request }) => {
       }
     }
 
-    if (createdShops.length === 0 && updatedShops.length === 0) {
+    if (updatedShops.length === 0) {
       return {
         ok: false,
         message: `Sync failed. ${failedShops.join(", ")}`,
@@ -535,11 +497,8 @@ export const action = async ({ request }) => {
     }
 
     const messageParts = [
-      `Synced "${sourceProduct.title}" to ${createdShops.length + updatedShops.length} store(s).`,
+      `Synced "${sourceProduct.title}" to ${updatedShops.length} matched store(s).`,
     ];
-    if (createdShops.length > 0) {
-      messageParts.push(`Created: ${createdShops.join(", ")}.`);
-    }
     if (updatedShops.length > 0) {
       messageParts.push(`Updated by SKU match: ${updatedShops.join(", ")}.`);
     }
@@ -555,7 +514,7 @@ export const action = async ({ request }) => {
     }
 
     return {
-      ok: createdShops.length > 0,
+      ok: updatedShops.length > 0,
       message: messageParts.join(" "),
     };
   }
