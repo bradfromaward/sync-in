@@ -1,326 +1,323 @@
-import { useEffect } from "react";
-import { useFetcher } from "react-router";
+import { useEffect, useMemo, useState } from "react";
+import { Form, useFetcher, useLoaderData } from "react-router";
 import { useAppBridge } from "@shopify/app-bridge-react";
 import { boundary } from "@shopify/shopify-app-react-router/server";
-import { authenticate } from "../shopify.server";
+import db from "../db.server";
+import { authenticate, unauthenticated } from "../shopify.server";
 
 export const loader = async ({ request }) => {
-  await authenticate.admin(request);
+  const { admin, session } = await authenticate.admin(request);
+  const url = new URL(request.url);
+  const searchQuery = (url.searchParams.get("q") || "").trim();
 
-  return null;
-};
-
-export const action = async ({ request }) => {
-  const { admin } = await authenticate.admin(request);
-  const color = ["Red", "Orange", "Yellow", "Green"][
-    Math.floor(Math.random() * 4)
-  ];
-  const response = await admin.graphql(
+  const productsResponse = await admin.graphql(
     `#graphql
-      mutation populateProduct($product: ProductCreateInput!) {
-        productCreate(product: $product) {
-          product {
+      query SearchProducts($searchQuery: String) {
+        products(first: 25, query: $searchQuery, sortKey: TITLE) {
+          nodes {
             id
             title
-            handle
             status
-            variants(first: 10) {
-              edges {
-                node {
-                  id
-                  price
-                  barcode
-                  createdAt
-                }
-              }
-            }
-            demoInfo: metafield(namespace: "$app", key: "demo_info") {
-              jsonValue
-            }
+            vendor
+            productType
           }
         }
       }`,
     {
       variables: {
-        product: {
-          title: `${color} Snowboard`,
-          metafields: [
-            {
-              namespace: "$app",
-              key: "demo_info",
-              value: "Created by React Router Template",
-            },
-          ],
-        },
+        searchQuery: searchQuery || null,
       },
     },
   );
-  const responseJson = await response.json();
-  const product = responseJson.data.productCreate.product;
-  const variantId = product.variants.edges[0].node.id;
-  const variantResponse = await admin.graphql(
-    `#graphql
-    mutation shopifyReactRouterTemplateUpdateVariant($productId: ID!, $variants: [ProductVariantsBulkInput!]!) {
-      productVariantsBulkUpdate(productId: $productId, variants: $variants) {
-        productVariants {
-          id
-          price
-          barcode
-          createdAt
-        }
-      }
-    }`,
-    {
-      variables: {
-        productId: product.id,
-        variants: [{ id: variantId, price: "100.00" }],
-      },
+  const productsJson = await productsResponse.json();
+  const products = productsJson.data?.products?.nodes ?? [];
+
+  const connectedStoreSessions = await db.session.findMany({
+    where: {
+      isOnline: false,
+      shop: { not: session.shop },
     },
-  );
-  const variantResponseJson = await variantResponse.json();
-  const metaobjectResponse = await admin.graphql(
-    `#graphql
-    mutation shopifyReactRouterTemplateUpsertMetaobject($handle: MetaobjectHandleInput!, $metaobject: MetaobjectUpsertInput!) {
-      metaobjectUpsert(handle: $handle, metaobject: $metaobject) {
-        metaobject {
-          id
-          handle
-          title: field(key: "title") {
-            jsonValue
-          }
-          description: field(key: "description") {
-            jsonValue
-          }
-        }
-        userErrors {
-          field
-          message
-        }
-      }
-    }`,
-    {
-      variables: {
-        handle: {
-          type: "$app:example",
-          handle: "demo-entry",
-        },
-        metaobject: {
-          fields: [
-            { key: "title", value: "Demo Entry" },
-            {
-              key: "description",
-              value:
-                "This metaobject was created by the Shopify app template to demonstrate the metaobject API.",
-            },
-          ],
-        },
-      },
+    select: {
+      shop: true,
     },
-  );
-  const metaobjectResponseJson = await metaobjectResponse.json();
+    orderBy: {
+      shop: "asc",
+    },
+  });
 
   return {
-    product: responseJson.data.productCreate.product,
-    variant: variantResponseJson.data.productVariantsBulkUpdate.productVariants,
-    metaobject: metaobjectResponseJson.data.metaobjectUpsert.metaobject,
+    currentShop: session.shop,
+    searchQuery,
+    products,
+    connectedStores: connectedStoreSessions.map((record) => record.shop),
+  };
+};
+
+export const action = async ({ request }) => {
+  const { admin, session, redirect } = await authenticate.admin(request);
+  const formData = await request.formData();
+  const intent = formData.get("intent");
+
+  if (intent === "connect-store") {
+    const targetShop = String(formData.get("targetShop") || "")
+      .trim()
+      .toLowerCase();
+    const isValidShopDomain = /^[a-z0-9][a-z0-9-]*\.myshopify\.com$/.test(
+      targetShop,
+    );
+
+    if (!isValidShopDomain) {
+      return {
+        ok: false,
+        message: "Enter a valid shop domain (example.myshopify.com).",
+      };
+    }
+
+    if (targetShop === session.shop) {
+      return {
+        ok: false,
+        message: "The source and target stores must be different.",
+      };
+    }
+
+    return redirect(`/auth/login?shop=${encodeURIComponent(targetShop)}`);
+  }
+
+  if (intent === "sync-product") {
+    const productId = String(formData.get("productId") || "").trim();
+    const targetShop = String(formData.get("targetShop") || "")
+      .trim()
+      .toLowerCase();
+
+    if (!productId || !targetShop) {
+      return {
+        ok: false,
+        message: "Pick a target store and product before syncing.",
+      };
+    }
+
+    const targetSession = await db.session.findFirst({
+      where: {
+        shop: targetShop,
+        isOnline: false,
+      },
+      select: {
+        shop: true,
+      },
+    });
+
+    if (!targetSession) {
+      return {
+        ok: false,
+        message: `No saved OAuth session for ${targetShop}. Connect it first.`,
+      };
+    }
+
+    const sourceProductResponse = await admin.graphql(
+      `#graphql
+        query SourceProduct($id: ID!) {
+          product(id: $id) {
+            id
+            title
+            descriptionHtml
+            vendor
+            productType
+            tags
+          }
+        }`,
+      {
+        variables: {
+          id: productId,
+        },
+      },
+    );
+    const sourceProductJson = await sourceProductResponse.json();
+    const sourceProduct = sourceProductJson.data?.product;
+
+    if (!sourceProduct) {
+      return {
+        ok: false,
+        message: "Could not load that source product.",
+      };
+    }
+
+    const { admin: targetAdmin } = await unauthenticated.admin(targetShop);
+    const createProductResponse = await targetAdmin.graphql(
+      `#graphql
+        mutation SyncProduct($product: ProductCreateInput!) {
+          productCreate(product: $product) {
+            product {
+              id
+              title
+              status
+            }
+            userErrors {
+              field
+              message
+            }
+          }
+        }`,
+      {
+        variables: {
+          product: {
+            title: sourceProduct.title,
+            descriptionHtml: sourceProduct.descriptionHtml,
+            vendor: sourceProduct.vendor,
+            productType: sourceProduct.productType,
+            tags: sourceProduct.tags,
+          },
+        },
+      },
+    );
+    const createProductJson = await createProductResponse.json();
+    const userErrors = createProductJson.data?.productCreate?.userErrors ?? [];
+
+    if (userErrors.length > 0) {
+      return {
+        ok: false,
+        message: `Sync failed: ${userErrors[0].message}`,
+      };
+    }
+
+    const syncedProduct = createProductJson.data?.productCreate?.product;
+
+    return {
+      ok: true,
+      message: `Synced "${sourceProduct.title}" to ${targetShop}.`,
+      syncedProduct,
+    };
+  }
+
+  return {
+    ok: false,
+    message: "Unknown action.",
   };
 };
 
 export default function Index() {
-  const fetcher = useFetcher();
+  const { currentShop, searchQuery, products, connectedStores } = useLoaderData();
+  const syncFetcher = useFetcher();
   const shopify = useAppBridge();
-  const isLoading =
-    ["loading", "submitting"].includes(fetcher.state) &&
-    fetcher.formMethod === "POST";
+  const [targetShop, setTargetShop] = useState(connectedStores[0] || "");
+  const isSyncing = syncFetcher.state !== "idle";
+  const hasConnectedStores = connectedStores.length > 0;
 
   useEffect(() => {
-    if (fetcher.data?.product?.id) {
-      shopify.toast.show("Product created");
+    if (!targetShop && connectedStores.length > 0) {
+      setTargetShop(connectedStores[0]);
     }
-  }, [fetcher.data?.product?.id, shopify]);
-  const generateProduct = () => fetcher.submit({}, { method: "POST" });
+  }, [connectedStores, targetShop]);
+
+  useEffect(() => {
+    if (syncFetcher.data?.message) {
+      shopify.toast.show(syncFetcher.data.message);
+    }
+  }, [shopify, syncFetcher.data?.message]);
+
+  const emptySearchState = useMemo(() => {
+    if (products.length > 0) {
+      return null;
+    }
+
+    if (searchQuery) {
+      return `No products found for "${searchQuery}".`;
+    }
+
+    return "No products found on this store yet.";
+  }, [products, searchQuery]);
 
   return (
-    <s-page heading="Shopify app template">
-      <s-button slot="primary-action" onClick={generateProduct}>
-        Generate a product
-      </s-button>
-
-      <s-section heading="Congrats on creating a new Shopify app 🎉">
+    <s-page heading="Store sync">
+      <s-section heading="Connected stores">
         <s-paragraph>
-          This embedded app template uses{" "}
-          <s-link
-            href="https://shopify.dev/docs/apps/tools/app-bridge"
-            target="_blank"
-          >
-            App Bridge
-          </s-link>{" "}
-          interface examples like an{" "}
-          <s-link href="/app/additional">additional page in the app nav</s-link>
-          , as well as an{" "}
-          <s-link
-            href="https://shopify.dev/docs/api/admin-graphql"
-            target="_blank"
-          >
-            Admin GraphQL
-          </s-link>{" "}
-          mutation demo, to provide a starting point for app development.
+          Source store: <s-text>{currentShop}</s-text>
         </s-paragraph>
-      </s-section>
-      <s-section heading="Get started with products">
-        <s-paragraph>
-          Generate a product with GraphQL and get the JSON output for that
-          product. Learn more about the{" "}
-          <s-link
-            href="https://shopify.dev/docs/api/admin-graphql/latest/mutations/productCreate"
-            target="_blank"
-          >
-            productCreate
-          </s-link>{" "}
-          mutation in our API references. Includes a product{" "}
-          <s-link
-            href="https://shopify.dev/docs/apps/build/custom-data/metafields"
-            target="_blank"
-          >
-            metafield
-          </s-link>{" "}
-          and{" "}
-          <s-link
-            href="https://shopify.dev/docs/apps/build/custom-data/metaobjects"
-            target="_blank"
-          >
-            metaobject
-          </s-link>
-          .
-        </s-paragraph>
-        <s-stack direction="inline" gap="base">
-          <s-button
-            onClick={generateProduct}
-            {...(isLoading ? { loading: true } : {})}
-          >
-            Generate a product
-          </s-button>
-          {fetcher.data?.product && (
-            <s-button
-              onClick={() => {
-                shopify.intents.invoke?.("edit:shopify/Product", {
-                  value: fetcher.data?.product?.id,
-                });
-              }}
-              target="_blank"
-              variant="tertiary"
-            >
-              Edit product
-            </s-button>
-          )}
-        </s-stack>
-        {fetcher.data?.product && (
-          <s-section heading="productCreate mutation">
-            <s-stack direction="block" gap="base">
-              <s-box
-                padding="base"
-                borderWidth="base"
-                borderRadius="base"
-                background="subdued"
-              >
-                <pre style={{ margin: 0 }}>
-                  <code>{JSON.stringify(fetcher.data.product, null, 2)}</code>
-                </pre>
-              </s-box>
-
-              <s-heading>productVariantsBulkUpdate mutation</s-heading>
-              <s-box
-                padding="base"
-                borderWidth="base"
-                borderRadius="base"
-                background="subdued"
-              >
-                <pre style={{ margin: 0 }}>
-                  <code>{JSON.stringify(fetcher.data.variant, null, 2)}</code>
-                </pre>
-              </s-box>
-
-              <s-heading>metaobjectUpsert mutation</s-heading>
-              <s-box
-                padding="base"
-                borderWidth="base"
-                borderRadius="base"
-                background="subdued"
-              >
-                <pre style={{ margin: 0 }}>
-                  <code>
-                    {JSON.stringify(fetcher.data.metaobject, null, 2)}
-                  </code>
-                </pre>
-              </s-box>
-            </s-stack>
-          </s-section>
+        <form method="get" action="/auth/login" target="_top">
+          <s-stack direction="inline" gap="base">
+            <s-text-field
+              name="shop"
+              label="Connect another store"
+              details="example.myshopify.com"
+            ></s-text-field>
+            <s-button type="submit">Connect with OAuth</s-button>
+          </s-stack>
+        </form>
+        {hasConnectedStores ? (
+          <s-box padding="base" borderWidth="base" borderRadius="base">
+            <s-text>Saved OAuth stores:</s-text>
+            <s-unordered-list>
+              {connectedStores.map((shopDomain) => (
+                <s-list-item key={shopDomain}>{shopDomain}</s-list-item>
+              ))}
+            </s-unordered-list>
+          </s-box>
+        ) : (
+          <s-paragraph>No target stores connected yet.</s-paragraph>
         )}
       </s-section>
 
-      <s-section slot="aside" heading="App template specs">
-        <s-paragraph>
-          <s-text>Framework: </s-text>
-          <s-link href="https://reactrouter.com/" target="_blank">
-            React Router
-          </s-link>
-        </s-paragraph>
-        <s-paragraph>
-          <s-text>Interface: </s-text>
-          <s-link
-            href="https://shopify.dev/docs/api/app-home/using-polaris-components"
-            target="_blank"
-          >
-            Polaris web components
-          </s-link>
-        </s-paragraph>
-        <s-paragraph>
-          <s-text>API: </s-text>
-          <s-link
-            href="https://shopify.dev/docs/api/admin-graphql"
-            target="_blank"
-          >
-            GraphQL
-          </s-link>
-        </s-paragraph>
-        <s-paragraph>
-          <s-text>Custom data: </s-text>
-          <s-link
-            href="https://shopify.dev/docs/apps/build/custom-data"
-            target="_blank"
-          >
-            Metafields &amp; metaobjects
-          </s-link>
-        </s-paragraph>
-        <s-paragraph>
-          <s-text>Database: </s-text>
-          <s-link href="https://www.prisma.io/" target="_blank">
-            Prisma
-          </s-link>
-        </s-paragraph>
+      <s-section heading="Search products in this store">
+        <Form method="get">
+          <s-stack direction="inline" gap="base">
+            <s-text-field
+              name="q"
+              label="Search"
+              value={searchQuery}
+              placeholder="Search by title, vendor, tag, or type"
+            ></s-text-field>
+            <s-button type="submit">Search</s-button>
+          </s-stack>
+        </Form>
       </s-section>
 
-      <s-section slot="aside" heading="Next steps">
-        <s-unordered-list>
-          <s-list-item>
-            Build an{" "}
-            <s-link
-              href="https://shopify.dev/docs/apps/getting-started/build-app-example"
-              target="_blank"
+      <s-section heading="Sync product to selected store">
+        {hasConnectedStores && (
+          <s-stack direction="inline" gap="base">
+            <s-select
+              label="Target store"
+              value={targetShop}
+              onChange={(event) => setTargetShop(event.currentTarget.value)}
             >
-              example app
-            </s-link>
-          </s-list-item>
-          <s-list-item>
-            Explore Shopify&apos;s API with{" "}
-            <s-link
-              href="https://shopify.dev/docs/apps/tools/graphiql-admin-api"
-              target="_blank"
-            >
-              GraphiQL
-            </s-link>
-          </s-list-item>
-        </s-unordered-list>
+              {connectedStores.map((shopDomain) => (
+                <option key={shopDomain} value={shopDomain}>
+                  {shopDomain}
+                </option>
+              ))}
+            </s-select>
+          </s-stack>
+        )}
+
+        {emptySearchState ? (
+          <s-paragraph>{emptySearchState}</s-paragraph>
+        ) : (
+          <s-box padding="base" borderWidth="base" borderRadius="base">
+            <s-unordered-list>
+              {products.map((product) => (
+                <s-list-item key={product.id}>
+                  <s-stack direction="inline" gap="base" alignItems="center">
+                    <s-text>{product.title}</s-text>
+                    <s-text tone="subdued">
+                      {product.vendor || "Unknown vendor"}
+                    </s-text>
+                    <s-text tone="subdued">{product.status}</s-text>
+                    <syncFetcher.Form method="post">
+                      <input type="hidden" name="intent" value="sync-product" />
+                      <input type="hidden" name="productId" value={product.id} />
+                      <input type="hidden" name="targetShop" value={targetShop} />
+                      <s-button
+                        type="submit"
+                        disabled={!hasConnectedStores}
+                        {...(isSyncing ? { loading: true } : {})}
+                      >
+                        Sync
+                      </s-button>
+                    </syncFetcher.Form>
+                  </s-stack>
+                </s-list-item>
+              ))}
+            </s-unordered-list>
+          </s-box>
+        )}
       </s-section>
     </s-page>
   );
