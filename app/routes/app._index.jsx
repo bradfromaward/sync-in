@@ -289,6 +289,10 @@ export const action = async ({ request }) => {
         }))
       : [];
 
+    const createdShops = [];
+    const failedShops = [];
+    const variantWarningShops = [];
+
     for (const targetShop of targetShops) {
       const targetAdmin =
         targetShop === session.shop
@@ -325,13 +329,12 @@ export const action = async ({ request }) => {
       const userErrors = createProductJson.data?.productCreate?.userErrors ?? [];
 
       if (userErrors.length > 0) {
-        return {
-          ok: false,
-          message: `Sync failed for ${targetShop}: ${userErrors[0].message}`,
-        };
+        failedShops.push(`${targetShop} (${userErrors[0].message})`);
+        continue;
       }
 
       const syncedProduct = createProductJson.data?.productCreate?.product;
+      createdShops.push(targetShop);
       const targetVariantId = syncedProduct?.variants?.nodes?.[0]?.id;
       const shouldSyncVariantFields =
         selectedFields.has("sku") ||
@@ -339,56 +342,74 @@ export const action = async ({ request }) => {
         selectedFields.has("continue-selling-out-of-stock");
 
       if (shouldSyncVariantFields && targetVariantId && sourceVariant) {
-        const variantInput = {
+        const variantUpdateInput = {
           id: targetVariantId,
         };
 
-        if (selectedFields.has("sku")) {
-          variantInput.sku = sourceVariant.sku || "";
+        if (selectedFields.has("sku") && sourceVariant.sku) {
+          variantUpdateInput.sku = sourceVariant.sku;
         }
 
-        if (selectedFields.has("barcode")) {
-          variantInput.barcode = sourceVariant.barcode || null;
+        if (selectedFields.has("barcode") && sourceVariant.barcode) {
+          variantUpdateInput.barcode = sourceVariant.barcode;
         }
 
         if (selectedFields.has("continue-selling-out-of-stock")) {
-          variantInput.inventoryPolicy =
+          variantUpdateInput.inventoryPolicy =
             sourceVariant.inventoryPolicy === "CONTINUE" ? "CONTINUE" : "DENY";
         }
 
-        const updateVariantResponse = await targetAdmin.graphql(
-          `#graphql
-            mutation UpdateSyncedVariant($productId: ID!, $variants: [ProductVariantsBulkInput!]!) {
-              productVariantsBulkUpdate(productId: $productId, variants: $variants) {
+        if (Object.keys(variantUpdateInput).length > 1) {
+          const updateVariantResponse = await targetAdmin.graphql(
+            `#graphql
+            mutation UpdateSyncedVariant($input: ProductVariantInput!) {
+              productVariantUpdate(input: $input) {
                 userErrors {
                   field
                   message
                 }
               }
             }`,
-          {
-            variables: {
-              productId: syncedProduct.id,
-              variants: [variantInput],
+            {
+              variables: {
+                input: variantUpdateInput,
+              },
             },
-          },
-        );
-        const updateVariantJson = await updateVariantResponse.json();
-        const variantErrors =
-          updateVariantJson.data?.productVariantsBulkUpdate?.userErrors ?? [];
+          );
+          const updateVariantJson = await updateVariantResponse.json();
+          const variantErrors = updateVariantJson.data?.productVariantUpdate?.userErrors ?? [];
 
-        if (variantErrors.length > 0) {
-          return {
-            ok: false,
-            message: `Product created in ${targetShop}, but variant sync failed: ${variantErrors[0].message}`,
-          };
+          if (variantErrors.length > 0) {
+            variantWarningShops.push(`${targetShop} (${variantErrors[0].message})`);
+          }
         }
       }
     }
 
+    if (createdShops.length === 0) {
+      return {
+        ok: false,
+        message: `Sync failed. ${failedShops.join(", ")}`,
+      };
+    }
+
+    const messageParts = [
+      `Synced "${sourceProduct.title}" to ${createdShops.length} store(s).`,
+    ];
+
+    if (variantWarningShops.length > 0) {
+      messageParts.push(
+        `Some variant fields could not be updated: ${variantWarningShops.join(", ")}.`,
+      );
+    }
+
+    if (failedShops.length > 0) {
+      messageParts.push(`Failed stores: ${failedShops.join(", ")}.`);
+    }
+
     return {
-      ok: true,
-      message: `Synced "${sourceProduct.title}" to ${targetShops.length} store(s).`,
+      ok: createdShops.length > 0,
+      message: messageParts.join(" "),
     };
   }
 
@@ -602,8 +623,7 @@ export default function Index() {
               <select
                 id="sourceShopSelect"
                 name="sourceShop"
-                value={sourceShop}
-                onChange={() => {}}
+                defaultValue={sourceShop}
                 style={{
                   width: "260px",
                   padding: "8px",
