@@ -21,7 +21,7 @@ api_version = "2026-04"
 
 [access_scopes]
 # Learn more at https://shopify.dev/docs/apps/tools/cli/configuration#access_scopes
-scopes = "read_products,write_metaobject_definitions,write_metaobjects,write_products"
+scopes = "read_products,write_products,read_inventory,write_inventory,write_metaobject_definitions,write_metaobjects"
 
 [auth]
 redirect_urls = [ "https://sync-in-yj2r.onrender.com/api/auth/callback", "https://sync-in-yj2r.onrender.com/auth/callback" ]

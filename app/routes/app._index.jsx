@@ -350,9 +350,7 @@ export const action = async ({ request }) => {
       createdShops.push(targetShop);
       const targetVariant = syncedProduct?.variants?.nodes?.[0];
       const targetVariantId = targetVariant?.id;
-      const targetInventoryItemId = targetVariant?.inventoryItem?.id;
       const shouldSyncVariantFields =
-        selectedFields.has("sku") ||
         selectedFields.has("barcode") ||
         selectedFields.has("continue-selling-out-of-stock");
 
@@ -361,8 +359,8 @@ export const action = async ({ request }) => {
           id: targetVariantId,
         };
 
-        if (selectedFields.has("barcode") && sourceVariant.barcode) {
-          variantUpdateInput.barcode = sourceVariant.barcode;
+        if (selectedFields.has("barcode")) {
+          variantUpdateInput.barcode = sourceVariant.barcode ?? "";
         }
 
         if (selectedFields.has("continue-selling-out-of-stock")) {
@@ -372,7 +370,7 @@ export const action = async ({ request }) => {
 
         if (Object.keys(variantUpdateInput).length > 1) {
           try {
-            const updateVariantResponse = await targetAdmin.graphql(
+            let updateVariantResponse = await targetAdmin.graphql(
               `#graphql
                 mutation UpdateSyncedVariant($productId: ID!, $variants: [ProductVariantsBulkInput!]!) {
                   productVariantsBulkUpdate(productId: $productId, variants: $variants) {
@@ -389,7 +387,43 @@ export const action = async ({ request }) => {
                 },
               },
             );
-            const updateVariantJson = await updateVariantResponse.json();
+            let updateVariantJson = await updateVariantResponse.json();
+
+            if (
+              selectedFields.has("barcode") &&
+              updateVariantJson?.errors?.[0]?.message?.includes("0.barcode")
+            ) {
+              const fallbackVariantInput = {
+                id: targetVariantId,
+                inventoryItem: {
+                  barcode: sourceVariant.barcode ?? "",
+                },
+              };
+
+              if (selectedFields.has("continue-selling-out-of-stock")) {
+                fallbackVariantInput.inventoryPolicy =
+                  sourceVariant.inventoryPolicy === "CONTINUE" ? "CONTINUE" : "DENY";
+              }
+
+              updateVariantResponse = await targetAdmin.graphql(
+                `#graphql
+                  mutation UpdateSyncedVariant($productId: ID!, $variants: [ProductVariantsBulkInput!]!) {
+                    productVariantsBulkUpdate(productId: $productId, variants: $variants) {
+                      userErrors {
+                        field
+                        message
+                      }
+                    }
+                  }`,
+                {
+                  variables: {
+                    productId: syncedProduct.id,
+                    variants: [fallbackVariantInput],
+                  },
+                },
+              );
+              updateVariantJson = await updateVariantResponse.json();
+            }
             const variantErrors =
               updateVariantJson.data?.productVariantsBulkUpdate?.userErrors ?? [];
 
@@ -399,43 +433,6 @@ export const action = async ({ request }) => {
           } catch (error) {
             variantWarningShops.push(
               `${targetShop} (variant fields update failed: ${error?.message || "unknown error"})`,
-            );
-          }
-        }
-
-        if (selectedFields.has("sku") && sourceVariant.sku && targetInventoryItemId) {
-          try {
-            const updateInventoryItemResponse = await targetAdmin.graphql(
-              `#graphql
-                mutation UpdateInventoryItemSku($id: ID!, $input: InventoryItemInput!) {
-                  inventoryItemUpdate(id: $id, input: $input) {
-                    userErrors {
-                      field
-                      message
-                    }
-                  }
-                }`,
-              {
-                variables: {
-                  id: targetInventoryItemId,
-                  input: {
-                    sku: sourceVariant.sku,
-                  },
-                },
-              },
-            );
-            const updateInventoryItemJson = await updateInventoryItemResponse.json();
-            const inventoryItemErrors =
-              updateInventoryItemJson.data?.inventoryItemUpdate?.userErrors ?? [];
-
-            if (inventoryItemErrors.length > 0) {
-              variantWarningShops.push(
-                `${targetShop} (SKU update failed: ${inventoryItemErrors[0].message})`,
-              );
-            }
-          } catch (error) {
-            variantWarningShops.push(
-              `${targetShop} (SKU update failed: ${error?.message || "unknown error"})`,
             );
           }
         }
@@ -532,7 +529,6 @@ export default function Index() {
     barcode: true,
     images: true,
     vendor: true,
-    sku: true,
     continueSellingOutOfStock: true,
   });
   const [firstImageId, setFirstImageId] = useState("");
@@ -596,7 +592,6 @@ export default function Index() {
       barcode: true,
       images: true,
       vendor: true,
-      sku: true,
       continueSellingOutOfStock: true,
     });
     setFirstImageId(product.images?.nodes?.[0]?.id || "");
@@ -956,21 +951,6 @@ export default function Index() {
                       }
                     />{" "}
                     Vendor
-                  </label>
-                  <label>
-                    <input
-                      type="checkbox"
-                      name="fields"
-                      value="sku"
-                      checked={syncOptions.sku}
-                      onChange={(event) =>
-                        setSyncOptions((previous) => ({
-                          ...previous,
-                          sku: event.currentTarget.checked,
-                        }))
-                      }
-                    />{" "}
-                    SKU
                   </label>
                   <label>
                     <input
