@@ -597,13 +597,27 @@ export default function Index() {
       <s-section heading="Search products in this store">
         <Form method="get">
           <s-stack direction="inline" gap="base" alignItems="end">
-            <s-select name="sourceShop" label="View products from" value={sourceShop}>
-              {availableSourceStores.map((shopDomain) => (
-                <option key={shopDomain} value={shopDomain}>
-                  {shopDomain}
-                </option>
-              ))}
-            </s-select>
+            <div>
+              <label htmlFor="sourceShopSelect">View products from</label>
+              <select
+                id="sourceShopSelect"
+                name="sourceShop"
+                value={sourceShop}
+                onChange={() => {}}
+                style={{
+                  width: "260px",
+                  padding: "8px",
+                  borderRadius: "8px",
+                  border: "1px solid #d1d5db",
+                }}
+              >
+                {availableSourceStores.map((shopDomain) => (
+                  <option key={shopDomain} value={shopDomain}>
+                    {shopDomain}
+                  </option>
+                ))}
+              </select>
+            </div>
             <s-text-field
               name="q"
               label="Search"
@@ -743,23 +757,33 @@ export default function Index() {
                 {firstImageId ? <input type="hidden" name="firstImageId" value={firstImageId} /> : null}
 
                 <s-stack gap="tight">
-                  <s-select
-                    label="Target stores (multi-select)"
-                    value={selectedTargetShops}
-                    multiple
-                    onChange={(event) => {
-                      const values = Array.from(event.currentTarget.selectedOptions).map(
-                        (option) => option.value,
-                      );
-                      setSelectedTargetShops(values);
-                    }}
-                  >
-                    {availableTargetStores.map((shopDomain) => (
-                      <option key={shopDomain} value={shopDomain}>
-                        {shopDomain}
-                      </option>
-                    ))}
-                  </s-select>
+                  <div>
+                    <label htmlFor="targetStoresMultiSelect">Target stores (multi-select)</label>
+                    <select
+                      id="targetStoresMultiSelect"
+                      multiple
+                      value={selectedTargetShops}
+                      onChange={(event) => {
+                        const values = Array.from(event.currentTarget.selectedOptions).map(
+                          (option) => option.value,
+                        );
+                        setSelectedTargetShops(values);
+                      }}
+                      style={{
+                        width: "100%",
+                        minHeight: "120px",
+                        padding: "8px",
+                        borderRadius: "8px",
+                        border: "1px solid #d1d5db",
+                      }}
+                    >
+                      {availableTargetStores.map((shopDomain) => (
+                        <option key={shopDomain} value={shopDomain}>
+                          {shopDomain}
+                        </option>
+                      ))}
+                    </select>
+                  </div>
                   <label>
                     <input
                       type="checkbox"
@@ -821,17 +845,26 @@ export default function Index() {
                     Images
                   </label>
                   {syncOptions.images && selectedProductImages.length > 0 ? (
-                    <s-select
-                      label="First image in target store"
-                      value={firstImageId}
-                      onChange={(event) => setFirstImageId(event.currentTarget.value)}
-                    >
-                      {selectedProductImages.map((image, index) => (
-                        <option key={image.id} value={image.id}>
-                          {index + 1}. {image.altText || image.url}
-                        </option>
-                      ))}
-                    </s-select>
+                    <div>
+                      <label htmlFor="firstImageSelect">First image in target store</label>
+                      <select
+                        id="firstImageSelect"
+                        value={firstImageId}
+                        onChange={(event) => setFirstImageId(event.currentTarget.value)}
+                        style={{
+                          width: "100%",
+                          padding: "8px",
+                          borderRadius: "8px",
+                          border: "1px solid #d1d5db",
+                        }}
+                      >
+                        {selectedProductImages.map((image, index) => (
+                          <option key={image.id} value={image.id}>
+                            {index + 1}. {image.altText || image.url}
+                          </option>
+                        ))}
+                      </select>
+                    </div>
                   ) : null}
                   <label>
                     <input
