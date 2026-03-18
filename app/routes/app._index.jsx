@@ -300,77 +300,194 @@ export const action = async ({ request }) => {
       : [];
 
     const createdShops = [];
+    const updatedShops = [];
     const failedShops = [];
     const variantWarningShops = [];
+    const sourceSku = (sourceVariant?.sku || "").trim();
 
     for (const targetShop of targetShops) {
       const targetAdmin =
         targetShop === session.shop
           ? admin
           : (await unauthenticated.admin(targetShop)).admin;
-      const createProductResponse = await targetAdmin.graphql(
-        `#graphql
-          mutation SyncProduct($product: ProductCreateInput!, $media: [CreateMediaInput!]) {
-            productCreate(product: $product, media: $media) {
-              product {
-                id
-                title
-                status
-                variants(first: 1) {
-                  nodes {
+      let targetProductId = null;
+      let targetVariantId = null;
+
+      if (sourceSku) {
+        const lookupResponse = await targetAdmin.graphql(
+          `#graphql
+            query FindBySku($query: String!) {
+              productVariants(first: 1, query: $query) {
+                nodes {
+                  id
+                  product {
                     id
-                  inventoryItem {
-                    id
-                  }
                   }
                 }
               }
-              userErrors {
-                field
-                message
-              }
-            }
-          }`,
-        {
-          variables: {
-            product: productInput,
-            media: mediaInput.length > 0 ? mediaInput : null,
+            }`,
+          {
+            variables: {
+              query: `sku:${sourceSku}`,
+            },
           },
-        },
-      );
-      const createProductJson = await createProductResponse.json();
-      const userErrors = createProductJson.data?.productCreate?.userErrors ?? [];
-
-      if (userErrors.length > 0) {
-        failedShops.push(`${targetShop} (${userErrors[0].message})`);
-        continue;
+        );
+        const lookupJson = await lookupResponse.json();
+        const existingVariant = lookupJson.data?.productVariants?.nodes?.[0] ?? null;
+        targetProductId = existingVariant?.product?.id ?? null;
+        targetVariantId = existingVariant?.id ?? null;
       }
 
-      const syncedProduct = createProductJson.data?.productCreate?.product;
-      createdShops.push(targetShop);
-      const targetVariant = syncedProduct?.variants?.nodes?.[0];
-      const targetVariantId = targetVariant?.id;
+      if (targetProductId) {
+        const productUpdateInput = { id: targetProductId };
+
+        if (selectedFields.has("title")) {
+          productUpdateInput.title = sourceProduct.title;
+        }
+        if (selectedFields.has("description")) {
+          productUpdateInput.descriptionHtml = sourceProduct.descriptionHtml;
+        }
+        if (selectedFields.has("vendor")) {
+          productUpdateInput.vendor = sourceProduct.vendor;
+        }
+
+        if (Object.keys(productUpdateInput).length > 1) {
+          const productUpdateResponse = await targetAdmin.graphql(
+            `#graphql
+              mutation SyncExistingProduct($product: ProductUpdateInput!) {
+                productUpdate(product: $product) {
+                  product {
+                    id
+                  }
+                  userErrors {
+                    field
+                    message
+                  }
+                }
+              }`,
+            {
+              variables: {
+                product: productUpdateInput,
+              },
+            },
+          );
+          const productUpdateJson = await productUpdateResponse.json();
+          const updateErrors = productUpdateJson.data?.productUpdate?.userErrors ?? [];
+          if (updateErrors.length > 0) {
+            failedShops.push(`${targetShop} (${updateErrors[0].message})`);
+            continue;
+          }
+        }
+
+        if (selectedFields.has("images") && mediaInput.length > 0) {
+          const mediaResponse = await targetAdmin.graphql(
+            `#graphql
+              mutation AddImagesToExistingProduct($productId: ID!, $media: [CreateMediaInput!]!) {
+                productCreateMedia(productId: $productId, media: $media) {
+                  mediaUserErrors {
+                    field
+                    message
+                  }
+                }
+              }`,
+            {
+              variables: {
+                productId: targetProductId,
+                media: mediaInput,
+              },
+            },
+          );
+          const mediaJson = await mediaResponse.json();
+          const mediaErrors = mediaJson.data?.productCreateMedia?.mediaUserErrors ?? [];
+          if (mediaErrors.length > 0) {
+            variantWarningShops.push(`${targetShop} (image update failed: ${mediaErrors[0].message})`);
+          }
+        }
+
+        updatedShops.push(targetShop);
+      } else {
+        const createProductResponse = await targetAdmin.graphql(
+          `#graphql
+            mutation SyncProduct($product: ProductCreateInput!, $media: [CreateMediaInput!]) {
+              productCreate(product: $product, media: $media) {
+                product {
+                  id
+                  title
+                  status
+                  variants(first: 1) {
+                    nodes {
+                      id
+                    }
+                  }
+                }
+                userErrors {
+                  field
+                  message
+                }
+              }
+            }`,
+          {
+            variables: {
+              product: productInput,
+              media: mediaInput.length > 0 ? mediaInput : null,
+            },
+          },
+        );
+        const createProductJson = await createProductResponse.json();
+        const userErrors = createProductJson.data?.productCreate?.userErrors ?? [];
+
+        if (userErrors.length > 0) {
+          failedShops.push(`${targetShop} (${userErrors[0].message})`);
+          continue;
+        }
+
+        const syncedProduct = createProductJson.data?.productCreate?.product;
+        createdShops.push(targetShop);
+        targetProductId = syncedProduct?.id ?? null;
+        targetVariantId = syncedProduct?.variants?.nodes?.[0]?.id ?? null;
+      }
+
       const shouldSyncVariantFields =
         selectedFields.has("barcode") ||
         selectedFields.has("continue-selling-out-of-stock");
 
       if (shouldSyncVariantFields && targetVariantId && sourceVariant) {
-        const variantUpdateInput = {
+        const baseVariantInput = {
           id: targetVariantId,
         };
-
-        if (selectedFields.has("barcode")) {
-          variantUpdateInput.barcode = sourceVariant.barcode ?? "";
-        }
-
         if (selectedFields.has("continue-selling-out-of-stock")) {
-          variantUpdateInput.inventoryPolicy =
+          baseVariantInput.inventoryPolicy =
             sourceVariant.inventoryPolicy === "CONTINUE" ? "CONTINUE" : "DENY";
         }
 
-        if (Object.keys(variantUpdateInput).length > 1) {
+        const attempts = [];
+        const barcodeValue = sourceVariant.barcode ?? "";
+        const wantsBarcode = selectedFields.has("barcode");
+
+        const topLevelBarcodeInput = { ...baseVariantInput };
+        if (wantsBarcode) {
+          topLevelBarcodeInput.barcode = barcodeValue;
+        }
+        attempts.push(topLevelBarcodeInput);
+
+        if (wantsBarcode) {
+          const nestedInventoryInput = { ...baseVariantInput, inventoryItem: {} };
+          if (wantsBarcode) {
+            nestedInventoryInput.inventoryItem.barcode = barcodeValue;
+          }
+          attempts.push(nestedInventoryInput);
+        }
+
+        let variantUpdated = false;
+        let lastVariantError = "";
+
+        for (const variantAttemptInput of attempts) {
+          if (Object.keys(variantAttemptInput).length <= 1) {
+            continue;
+          }
+
           try {
-            let updateVariantResponse = await targetAdmin.graphql(
+            const updateVariantResponse = await targetAdmin.graphql(
               `#graphql
                 mutation UpdateSyncedVariant($productId: ID!, $variants: [ProductVariantsBulkInput!]!) {
                   productVariantsBulkUpdate(productId: $productId, variants: $variants) {
@@ -382,64 +499,35 @@ export const action = async ({ request }) => {
                 }`,
               {
                 variables: {
-                  productId: syncedProduct.id,
-                  variants: [variantUpdateInput],
+                  productId: targetProductId,
+                  variants: [variantAttemptInput],
                 },
               },
             );
-            let updateVariantJson = await updateVariantResponse.json();
-
-            if (
-              selectedFields.has("barcode") &&
-              updateVariantJson?.errors?.[0]?.message?.includes("0.barcode")
-            ) {
-              const fallbackVariantInput = {
-                id: targetVariantId,
-                inventoryItem: {
-                  barcode: sourceVariant.barcode ?? "",
-                },
-              };
-
-              if (selectedFields.has("continue-selling-out-of-stock")) {
-                fallbackVariantInput.inventoryPolicy =
-                  sourceVariant.inventoryPolicy === "CONTINUE" ? "CONTINUE" : "DENY";
-              }
-
-              updateVariantResponse = await targetAdmin.graphql(
-                `#graphql
-                  mutation UpdateSyncedVariant($productId: ID!, $variants: [ProductVariantsBulkInput!]!) {
-                    productVariantsBulkUpdate(productId: $productId, variants: $variants) {
-                      userErrors {
-                        field
-                        message
-                      }
-                    }
-                  }`,
-                {
-                  variables: {
-                    productId: syncedProduct.id,
-                    variants: [fallbackVariantInput],
-                  },
-                },
-              );
-              updateVariantJson = await updateVariantResponse.json();
-            }
+            const updateVariantJson = await updateVariantResponse.json();
+            const queryErrors = updateVariantJson.errors ?? [];
             const variantErrors =
               updateVariantJson.data?.productVariantsBulkUpdate?.userErrors ?? [];
 
-            if (variantErrors.length > 0) {
-              variantWarningShops.push(`${targetShop} (${variantErrors[0].message})`);
+            if (queryErrors.length === 0 && variantErrors.length === 0) {
+              variantUpdated = true;
+              break;
             }
+
+            lastVariantError =
+              variantErrors[0]?.message || queryErrors[0]?.message || "unknown variant update error";
           } catch (error) {
-            variantWarningShops.push(
-              `${targetShop} (variant fields update failed: ${error?.message || "unknown error"})`,
-            );
+            lastVariantError = error?.message || "unknown variant update error";
           }
+        }
+
+        if (!variantUpdated && lastVariantError) {
+          variantWarningShops.push(`${targetShop} (${lastVariantError})`);
         }
       }
     }
 
-    if (createdShops.length === 0) {
+    if (createdShops.length === 0 && updatedShops.length === 0) {
       return {
         ok: false,
         message: `Sync failed. ${failedShops.join(", ")}`,
@@ -447,8 +535,14 @@ export const action = async ({ request }) => {
     }
 
     const messageParts = [
-      `Synced "${sourceProduct.title}" to ${createdShops.length} store(s).`,
+      `Synced "${sourceProduct.title}" to ${createdShops.length + updatedShops.length} store(s).`,
     ];
+    if (createdShops.length > 0) {
+      messageParts.push(`Created: ${createdShops.join(", ")}.`);
+    }
+    if (updatedShops.length > 0) {
+      messageParts.push(`Updated by SKU match: ${updatedShops.join(", ")}.`);
+    }
 
     if (variantWarningShops.length > 0) {
       messageParts.push(
