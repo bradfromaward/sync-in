@@ -9,6 +9,18 @@ uid = "8e755bd0-669c-e9ac-3b61-549b6293fab52aaec3bb"
 # Only 1 target can be specified for each Admin action extension
 [[extensions.targeting]]
 module = "./src/ActionExtension.jsx"
+target = "admin.product-index.selection-action.render"
+
+[[extensions]]
+# Reuse the same action on product details page
+name = "t:name"
+handle = "sync-in-x-product-details"
+
+uid = "046e1e9d-bab0-21c5-aa51-c7f0247c3cf05d7facaa"
+type = "ui_extension"
+
+[[extensions.targeting]]
+module = "./src/ActionExtension.jsx"
 target = "admin.product-details.action.render"
 
 
