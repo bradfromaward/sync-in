@@ -43,6 +43,7 @@ export const loader = async ({ request }) => {
   const { admin, session } = await authenticate.admin(request);
   const url = new URL(request.url);
   const searchQuery = (url.searchParams.get("q") || "").trim();
+  const openSyncProductId = (url.searchParams.get("openSyncProductId") || "").trim();
 
   const connectedStoreSessions = await db.session.findMany({
     where: {
@@ -114,12 +115,60 @@ export const loader = async ({ request }) => {
   );
   const productsJson = await productsResponse.json();
   const products = productsJson.data?.products?.nodes ?? [];
+  let openSyncProduct = null;
+
+  if (openSyncProductId) {
+    const openProductResponse = await sourceAdmin.graphql(
+      `#graphql
+        query OpenSyncProduct($id: ID!) {
+          product(id: $id) {
+            id
+            title
+            status
+            vendor
+            productType
+            featuredImage {
+              url
+              altText
+            }
+            images(first: 10) {
+              nodes {
+                id
+                url
+                altText
+              }
+            }
+            variants(first: 1) {
+              nodes {
+                id
+                sku
+                barcode
+                inventoryPolicy
+                inventoryItem {
+                  id
+                  sku
+                }
+              }
+            }
+          }
+        }`,
+      {
+        variables: {
+          id: openSyncProductId,
+        },
+      },
+    );
+    const openProductJson = await openProductResponse.json();
+    openSyncProduct = openProductJson.data?.product ?? null;
+  }
 
   return {
     currentShop: session.shop,
     sourceShop,
     searchQuery,
     products,
+    openSyncProductId,
+    openSyncProduct,
     connectedStores,
     availableSourceStores,
   };
@@ -569,6 +618,8 @@ export default function Index() {
     sourceShop,
     searchQuery,
     products,
+    openSyncProductId,
+    openSyncProduct,
     connectedStores,
     availableSourceStores,
   } = useLoaderData();
@@ -576,6 +627,7 @@ export default function Index() {
   const disconnectFetcher = useFetcher();
   const shopify = useAppBridge();
   const [syncModalProduct, setSyncModalProduct] = useState(null);
+  const [hasHandledOpenSyncParam, setHasHandledOpenSyncParam] = useState(false);
   const [syncOptions, setSyncOptions] = useState({
     title: true,
     description: true,
@@ -606,6 +658,40 @@ export default function Index() {
       return preserved.length > 0 ? preserved : [...availableTargetStores];
     });
   }, [availableTargetStores]);
+
+  useEffect(() => {
+    setHasHandledOpenSyncParam(false);
+  }, [openSyncProductId, sourceShop]);
+
+  useEffect(() => {
+    if (!openSyncProductId || hasHandledOpenSyncParam) {
+      return;
+    }
+
+    setHasHandledOpenSyncParam(true);
+
+    if (!openSyncProduct) {
+      return;
+    }
+
+    setSyncModalProduct(openSyncProduct);
+    setSyncOptions({
+      title: true,
+      description: true,
+      barcode: true,
+      images: true,
+      vendor: true,
+      continueSellingOutOfStock: true,
+    });
+    setFirstImageId(openSyncProduct.images?.nodes?.[0]?.id || "");
+    setSelectedTargetShops((previous) => {
+      if (previous.length > 0) {
+        const preserved = previous.filter((shop) => availableTargetStores.includes(shop));
+        if (preserved.length > 0) return preserved;
+      }
+      return [...availableTargetStores];
+    });
+  }, [availableTargetStores, hasHandledOpenSyncParam, openSyncProduct, openSyncProductId]);
 
   useEffect(() => {
     if (syncFetcher.data?.message) {
