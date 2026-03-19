@@ -1,7 +1,7 @@
 # Learn more about configuring your app at https://shopify.dev/docs/apps/tools/cli/configuration
 
 client_id = "8848e8e2ea07923f29b13ade8a9d4650"
-name = "sync-in"
+name = "ARVA Sync"
 application_url = "https://sync-in-yj2r.onrender.com"
 embedded = true
 

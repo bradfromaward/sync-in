@@ -195,34 +195,9 @@ export const loader = async ({ request }) => {
 };
 
 export const action = async ({ request }) => {
-  const { admin, session, redirect } = await authenticate.admin(request);
+  const { admin, session } = await authenticate.admin(request);
   const formData = await request.formData();
   const intent = formData.get("intent");
-
-  if (intent === "connect-store") {
-    const targetShop = String(formData.get("targetShop") || "")
-      .trim()
-      .toLowerCase();
-    const isValidShopDomain = /^[a-z0-9][a-z0-9-]*\.myshopify\.com$/.test(
-      targetShop,
-    );
-
-    if (!isValidShopDomain) {
-      return {
-        ok: false,
-        message: "Enter a valid shop domain (example.myshopify.com).",
-      };
-    }
-
-    if (targetShop === session.shop) {
-      return {
-        ok: false,
-        message: "The source and target stores must be different.",
-      };
-    }
-
-    return redirect(`/auth/login?shop=${encodeURIComponent(targetShop)}`);
-  }
 
   if (intent === "sync-product") {
     const productIds = [
@@ -628,44 +603,6 @@ export const action = async ({ request }) => {
     };
   }
 
-  if (intent === "disconnect-store") {
-    const shopToDisconnect = String(formData.get("shop") || "")
-      .trim()
-      .toLowerCase();
-
-    if (!shopToDisconnect) {
-      return {
-        ok: false,
-        message: "Choose a store to disconnect.",
-      };
-    }
-
-    if (shopToDisconnect === session.shop) {
-      return {
-        ok: false,
-        message: "You cannot disconnect the current source store.",
-      };
-    }
-
-    const result = await db.session.deleteMany({
-      where: {
-        shop: shopToDisconnect,
-      },
-    });
-
-    if (result.count === 0) {
-      return {
-        ok: false,
-        message: `No saved session found for ${shopToDisconnect}.`,
-      };
-    }
-
-    return {
-      ok: true,
-      message: `Disconnected ${shopToDisconnect}.`,
-    };
-  }
-
   return {
     ok: false,
     message: "Unknown action.",
@@ -684,7 +621,6 @@ export default function Index() {
     availableSourceStores,
   } = useLoaderData();
   const syncFetcher = useFetcher();
-  const disconnectFetcher = useFetcher();
   const shopify = useAppBridge();
   const [syncModalProducts, setSyncModalProducts] = useState([]);
   const [selectedProductIds, setSelectedProductIds] = useState([]);
@@ -702,11 +638,6 @@ export default function Index() {
     [currentShop, ...connectedStores].filter((shopDomain) => shopDomain !== sourceShop),
   );
   const isSyncing = syncFetcher.state !== "idle";
-  const disconnectingShop =
-    disconnectFetcher.formData && disconnectFetcher.formData.get("intent") === "disconnect-store"
-      ? String(disconnectFetcher.formData.get("shop") || "")
-      : "";
-  const hasConnectedStores = connectedStores.length > 0;
   const isBulkSyncMode = syncModalProducts.length > 1;
   const syncModalProduct = syncModalProducts[0] || null;
   const availableTargetStores = useMemo(
@@ -769,12 +700,6 @@ export default function Index() {
       setSelectedProductIds([]);
     }
   }, [syncFetcher.data?.ok]);
-
-  useEffect(() => {
-    if (disconnectFetcher.data?.message) {
-      shopify.toast.show(disconnectFetcher.data.message);
-    }
-  }, [disconnectFetcher.data?.message, shopify]);
 
   const emptySearchState = useMemo(() => {
     if (products.length > 0) {
@@ -840,60 +765,47 @@ export default function Index() {
   };
 
   const selectedProductImages = !isBulkSyncMode ? syncModalProduct?.images?.nodes ?? [] : [];
+  const selectedProductSkuRows = useMemo(
+    () =>
+      syncModalProducts.map((product) => {
+        const sku = (product.variants?.nodes?.[0]?.sku || "").trim() || "N/A";
+        return {
+          id: product.id,
+          title: product.title,
+          sku,
+        };
+      }),
+    [syncModalProducts],
+  );
+  const sectionHeadingStyle = { fontSize: "14px" };
+  const selectedFieldValues = useMemo(() => {
+    const fields = [];
+    if (syncOptions.title) fields.push("title");
+    if (syncOptions.description) fields.push("description");
+    if (syncOptions.barcode) fields.push("barcode");
+    if (syncOptions.images) fields.push("images");
+    if (syncOptions.vendor) fields.push("vendor");
+    if (syncOptions.continueSellingOutOfStock) fields.push("continue-selling-out-of-stock");
+    return fields;
+  }, [syncOptions]);
 
   return (
     <s-page heading="Store sync">
-      <s-section heading="Connected stores">
-        <s-paragraph>
-          Source store: <s-text>{currentShop}</s-text>
-        </s-paragraph>
-        <form method="get" action="/auth/login" target="_top">
-          <s-stack direction="inline" gap="base">
-            <s-text-field
-              name="shop"
-              label="Connect another store"
-              details="example.myshopify.com"
-            ></s-text-field>
-            <s-button type="submit">Connect with OAuth</s-button>
+      <s-section heading="Overview">
+        <s-box
+          padding="base"
+          borderWidth="base"
+          borderRadius="base"
+          style={{ background: "#f8fafc" }}
+        >
+          <s-stack direction="inline" gap="base" alignItems="center">
+            <s-text>Current store: {currentShop}</s-text>
+            <s-text tone="subdued">Connected targets: {connectedStores.length}</s-text>
+            <div style={{ marginLeft: "auto" }}>
+              <s-link href="/app/additional">Manage OAuth stores</s-link>
+            </div>
           </s-stack>
-        </form>
-        {hasConnectedStores ? (
-          <s-box padding="base" borderWidth="base" borderRadius="base">
-            <s-text>Saved OAuth stores:</s-text>
-            <s-unordered-list>
-              {connectedStores.map((shopDomain) => (
-                <s-list-item key={shopDomain}>
-                  <s-stack direction="inline" gap="base" alignItems="center">
-                    <s-text>{shopDomain}</s-text>
-                    <disconnectFetcher.Form
-                      method="post"
-                      onSubmit={(event) => {
-                        const confirmed = window.confirm(
-                          `Disconnect ${shopDomain}? You can reconnect later with OAuth.`,
-                        );
-                        if (!confirmed) {
-                          event.preventDefault();
-                        }
-                      }}
-                    >
-                      <input type="hidden" name="intent" value="disconnect-store" />
-                      <input type="hidden" name="shop" value={shopDomain} />
-                      <s-button
-                        type="submit"
-                        tone="critical"
-                        {...(disconnectingShop === shopDomain ? { loading: true } : {})}
-                      >
-                        Disconnect
-                      </s-button>
-                    </disconnectFetcher.Form>
-                  </s-stack>
-                </s-list-item>
-              ))}
-            </s-unordered-list>
-          </s-box>
-        ) : (
-          <s-paragraph>No target stores connected yet.</s-paragraph>
-        )}
+        </s-box>
       </s-section>
 
       <s-section heading="Search products in this store">
@@ -907,9 +819,10 @@ export default function Index() {
                 defaultValue={sourceShop}
                 style={{
                   width: "260px",
-                  padding: "8px",
+                  padding: "10px",
                   borderRadius: "8px",
                   border: "1px solid #d1d5db",
+                  background: "#ffffff",
                 }}
               >
                 {availableSourceStores.map((shopDomain) => (
@@ -948,46 +861,55 @@ export default function Index() {
             {products.map((product) => {
               const sku = product.variants?.nodes?.[0]?.sku || "N/A";
               const isSelected = selectedProductIds.includes(product.id);
+              const secondaryMeta = [
+                `${sku}`,
+                product.vendor || "Unknown vendor",
+                product.productType || "Uncategorized",
+              ];
               return (
                 <s-box
                   key={product.id}
                   padding="base"
                   borderWidth="base"
                   borderRadius="base"
+                  style={{
+                    background: "#ffffff",
+                    borderColor: isSelected ? "#3b82f6" : "#dfe3e8",
+                    boxShadow: isSelected
+                      ? "0 0 0 2px rgba(59, 130, 246, 0.14)"
+                      : "0 1px 0 rgba(17, 24, 39, 0.05)",
+                  }}
                 >
                   <s-stack direction="inline" gap="base" alignItems="center">
-                    <div style={{ display: "inline-flex", alignItems: "center" }}>
-                      <input
-                        type="checkbox"
-                        aria-label={`Select ${product.title}`}
-                        checked={isSelected}
-                        onChange={(event) => {
-                          const checked = event.currentTarget.checked;
-                          setSelectedProductIds((previous) => {
-                            if (checked) {
-                              return previous.includes(product.id)
-                                ? previous
-                                : [...previous, product.id];
-                            }
-                            return previous.filter((id) => id !== product.id);
-                          });
-                        }}
-                      />
-                    </div>
+                    <s-checkbox
+                      aria-label={`Select ${product.title}`}
+                      checked={isSelected}
+                      onChange={(event) => {
+                        const checked = event.currentTarget.checked;
+                        setSelectedProductIds((previous) => {
+                          if (checked) {
+                            return previous.includes(product.id)
+                              ? previous
+                              : [...previous, product.id];
+                          }
+                          return previous.filter((id) => id !== product.id);
+                        });
+                      }}
+                    ></s-checkbox>
                     {product.featuredImage?.url ? (
                       <img
                         src={product.featuredImage.url}
                         alt={product.featuredImage.altText || product.title}
-                        width="48"
-                        height="48"
-                        style={{ objectFit: "cover", borderRadius: "6px", flexShrink: 0 }}
+                        width="56"
+                        height="56"
+                        style={{ objectFit: "cover", borderRadius: "8px", flexShrink: 0 }}
                       />
                     ) : (
                       <div
                         style={{
-                          width: "48px",
-                          height: "48px",
-                          borderRadius: "6px",
+                          width: "56px",
+                          height: "56px",
+                          borderRadius: "8px",
                           border: "1px solid #d1d5db",
                           display: "flex",
                           alignItems: "center",
@@ -1000,18 +922,45 @@ export default function Index() {
                         No image
                       </div>
                     )}
-                    <s-stack gap="none">
-                      <s-text>{product.title}</s-text>
-                      <s-text tone="subdued">SKU: {sku}</s-text>
-                      <s-text tone="subdued">
-                        {product.vendor || "Unknown vendor"} {product.productType ? `- ${product.productType}` : ""}
-                      </s-text>
-                      <div>
+                    <s-stack gap="none" style={{ flex: 1, minWidth: 0 }}>
+                      <s-stack direction="inline" gap="tight" alignItems="center">
+                        <s-text type="strong">{product.title}</s-text>
+                        {isSelected ? (
+                          <span
+                            style={{
+                              borderRadius: "9999px",
+                              border: "1px solid #bfdbfe",
+                              background: "#eff6ff",
+                              color: "#1e40af",
+                              fontSize: "11px",
+                              fontWeight: 600,
+                              padding: "2px 8px",
+                              lineHeight: 1.5,
+                            }}
+                          >
+                            Selected
+                          </span>
+                        ) : null}
+                      </s-stack>
+                      <s-text tone="subdued">{secondaryMeta.join("  •  ")}</s-text>
+                    </s-stack>
+                    <div
+                      style={{
+                        marginLeft: "auto",
+                        minWidth: "148px",
+                        display: "flex",
+                        flexDirection: "column",
+                        alignItems: "flex-end",
+                        justifyContent: "center",
+                        gap: "8px",
+                      }}
+                    >
+                      <div style={{ display: "inline-flex" }}>
                         <span
                           style={{
                             ...getProductStatusChipStyle(product.status),
                             borderRadius: "9999px",
-                            padding: "2px 10px",
+                            padding: "3px 10px",
                             fontSize: "12px",
                             fontWeight: 600,
                             display: "inline-block",
@@ -1021,14 +970,12 @@ export default function Index() {
                           {product.status}
                         </span>
                       </div>
-                    </s-stack>
-                    <div style={{ marginLeft: "auto" }}>
                       <s-button
                         type="button"
                         disabled={availableTargetStores.length === 0}
                         onClick={() => openSyncModal(product)}
                       >
-                        Sync
+                        Configure sync
                       </s-button>
                     </div>
                   </s-stack>
@@ -1057,22 +1004,44 @@ export default function Index() {
           <div
             style={{
               background: "#ffffff",
-              borderRadius: "12px",
+              borderRadius: "14px",
               border: "1px solid #e5e7eb",
               width: "100%",
-              maxWidth: "560px",
+              maxWidth: "720px",
               maxHeight: "85vh",
               overflowY: "auto",
-              padding: "16px",
+              padding: "24px",
             }}
           >
             <s-stack gap="base">
-              <s-text variant="headingMd">Select fields to sync</s-text>
+              <s-text type="strong" style={{ fontSize: "16px" }}>
+                Select fields to sync
+              </s-text>
               <s-text tone="subdued">
                 {isBulkSyncMode
                   ? `Products selected: ${syncModalProducts.length}`
                   : `Product: ${syncModalProduct?.title || ""}`}
               </s-text>
+              <s-box
+                padding="base"
+                borderWidth="base"
+                borderRadius="base"
+                style={{ background: "#f8fafc" }}
+              >
+                <s-stack gap="tight">
+                  <s-text type="strong" style={sectionHeadingStyle}>
+                    Selected SKUs
+                  </s-text>
+                  <div style={{ display: "grid", gap: "6px", maxHeight: "140px", overflowY: "auto" }}>
+                    {selectedProductSkuRows.map((row) => (
+                      <s-stack key={row.id} direction="inline" gap="tight" alignItems="center">
+                        <s-text>{row.title}</s-text>
+                        <s-text tone="subdued">SKU: {row.sku}</s-text>
+                      </s-stack>
+                    ))}
+                  </div>
+                </s-stack>
+              </s-box>
 
               <syncFetcher.Form method="post">
                 <input type="hidden" name="intent" value="sync-product" />
@@ -1091,159 +1060,207 @@ export default function Index() {
                 {!isBulkSyncMode && firstImageId ? (
                   <input type="hidden" name="firstImageId" value={firstImageId} />
                 ) : null}
+                {selectedFieldValues.map((field) => (
+                  <input key={field} type="hidden" name="fields" value={field} />
+                ))}
 
-                <s-stack gap="tight">
-                  <div>
-                    <label htmlFor="targetStoresMultiSelect">Target stores (multi-select)</label>
-                    <select
-                      id="targetStoresMultiSelect"
-                      multiple
-                      value={selectedTargetShops}
-                      onChange={(event) => {
-                        const values = Array.from(event.currentTarget.selectedOptions).map(
-                          (option) => option.value,
-                        );
-                        setSelectedTargetShops(values);
-                      }}
-                      style={{
-                        width: "100%",
-                        minHeight: "120px",
-                        padding: "8px",
-                        borderRadius: "8px",
-                        border: "1px solid #d1d5db",
-                      }}
-                    >
-                      {availableTargetStores.map((shopDomain) => (
-                        <option key={shopDomain} value={shopDomain}>
-                          {shopDomain}
-                        </option>
-                      ))}
-                    </select>
-                  </div>
-                  <label>
-                    <input
-                      type="checkbox"
-                      name="fields"
-                      value="title"
-                      checked={syncOptions.title}
-                      onChange={(event) =>
-                        setSyncOptions((previous) => ({
-                          ...previous,
-                          title: event.currentTarget.checked,
-                        }))
-                      }
-                    />{" "}
-                    Title
-                  </label>
-                  <label>
-                    <input
-                      type="checkbox"
-                      name="fields"
-                      value="description"
-                      checked={syncOptions.description}
-                      onChange={(event) =>
-                        setSyncOptions((previous) => ({
-                          ...previous,
-                          description: event.currentTarget.checked,
-                        }))
-                      }
-                    />{" "}
-                    Description
-                  </label>
-                  <label>
-                    <input
-                      type="checkbox"
-                      name="fields"
-                      value="barcode"
-                      checked={syncOptions.barcode}
-                      onChange={(event) =>
-                        setSyncOptions((previous) => ({
-                          ...previous,
-                          barcode: event.currentTarget.checked,
-                        }))
-                      }
-                    />{" "}
-                    Barcode
-                  </label>
-                  <label>
-                    <input
-                      type="checkbox"
-                      name="fields"
-                      value="images"
-                      checked={syncOptions.images}
-                      onChange={(event) =>
-                        setSyncOptions((previous) => ({
-                          ...previous,
-                          images: event.currentTarget.checked,
-                        }))
-                      }
-                    />{" "}
-                    Images
-                  </label>
-                  {syncOptions.images && selectedProductImages.length > 0 ? (
-                    <div>
-                      <label htmlFor="firstImageSelect">First image in target store</label>
-                      <select
-                        id="firstImageSelect"
-                        value={firstImageId}
-                        onChange={(event) => setFirstImageId(event.currentTarget.value)}
+                <s-stack gap="loose">
+                  <s-box padding="base" borderWidth="base" borderRadius="base">
+                    <s-stack gap="base">
+                      <s-text type="strong" style={sectionHeadingStyle}>
+                        Where to sync
+                      </s-text>
+                      <s-stack direction="inline" gap="tight" alignItems="center">
+                        <s-text tone="subdued">{selectedTargetShops.length} store(s) selected</s-text>
+                        <s-button
+                          type="button"
+                          variant="plain"
+                          onClick={() => setSelectedTargetShops([...availableTargetStores])}
+                        >
+                          Select all
+                        </s-button>
+                        <s-button
+                          type="button"
+                          variant="plain"
+                          onClick={() => setSelectedTargetShops([])}
+                        >
+                          Clear
+                        </s-button>
+                      </s-stack>
+                      <div>
+                        <label htmlFor="targetStoresMultiSelect">Target stores (multi-select)</label>
+                        <select
+                          id="targetStoresMultiSelect"
+                          multiple
+                          value={selectedTargetShops}
+                          onChange={(event) => {
+                            const values = Array.from(event.currentTarget.selectedOptions).map(
+                              (option) => option.value,
+                            );
+                            setSelectedTargetShops(values);
+                          }}
+                          style={{
+                            width: "100%",
+                            minHeight: "140px",
+                            padding: "12px",
+                            borderRadius: "8px",
+                            border: "1px solid #d1d5db",
+                            background: "#ffffff",
+                          }}
+                        >
+                          {availableTargetStores.map((shopDomain) => (
+                            <option key={shopDomain} value={shopDomain}>
+                              {shopDomain}
+                            </option>
+                          ))}
+                        </select>
+                      </div>
+                    </s-stack>
+                  </s-box>
+                  <s-box padding="base" borderWidth="base" borderRadius="base">
+                    <s-stack gap="base">
+                      <s-text type="strong" style={sectionHeadingStyle}>
+                        Fields to sync
+                      </s-text>
+                      <s-stack direction="inline" gap="tight" alignItems="center">
+                        <s-button
+                          type="button"
+                          variant="plain"
+                          onClick={() =>
+                            setSyncOptions({
+                              title: true,
+                              description: true,
+                              barcode: true,
+                              images: true,
+                              vendor: true,
+                              continueSellingOutOfStock: true,
+                            })
+                          }
+                        >
+                          Select all fields
+                        </s-button>
+                        <s-button
+                          type="button"
+                          variant="plain"
+                          onClick={() =>
+                            setSyncOptions({
+                              title: false,
+                              description: false,
+                              barcode: false,
+                              images: false,
+                              vendor: false,
+                              continueSellingOutOfStock: false,
+                            })
+                          }
+                        >
+                          Clear fields
+                        </s-button>
+                      </s-stack>
+                      <div
                         style={{
-                          width: "100%",
-                          padding: "8px",
-                          borderRadius: "8px",
-                          border: "1px solid #d1d5db",
+                          display: "grid",
+                          gridTemplateColumns: "repeat(auto-fit, minmax(230px, 1fr))",
+                          gap: "10px 14px",
                         }}
                       >
-                        {selectedProductImages.map((image, index) => (
-                          <option key={image.id} value={image.id}>
-                            {index + 1}. {image.altText || image.url}
-                          </option>
-                        ))}
-                      </select>
-                    </div>
-                  ) : null}
-                  <label>
-                    <input
-                      type="checkbox"
-                      name="fields"
-                      value="vendor"
-                      checked={syncOptions.vendor}
-                      onChange={(event) =>
-                        setSyncOptions((previous) => ({
-                          ...previous,
-                          vendor: event.currentTarget.checked,
-                        }))
-                      }
-                    />{" "}
-                    Vendor
-                  </label>
-                  <label>
-                    <input
-                      type="checkbox"
-                      name="fields"
-                      value="continue-selling-out-of-stock"
-                      checked={syncOptions.continueSellingOutOfStock}
-                      onChange={(event) =>
-                        setSyncOptions((previous) => ({
-                          ...previous,
-                          continueSellingOutOfStock: event.currentTarget.checked,
-                        }))
-                      }
-                    />{" "}
-                    Continue Selling Out Of Stock
-                  </label>
+                        <s-checkbox
+                          label="Title"
+                          checked={syncOptions.title}
+                          onChange={(event) =>
+                            setSyncOptions((previous) => ({
+                              ...previous,
+                              title: event.currentTarget.checked,
+                            }))
+                          }
+                        ></s-checkbox>
+                        <s-checkbox
+                          label="Description"
+                          checked={syncOptions.description}
+                          onChange={(event) =>
+                            setSyncOptions((previous) => ({
+                              ...previous,
+                              description: event.currentTarget.checked,
+                            }))
+                          }
+                        ></s-checkbox>
+                        <s-checkbox
+                          label="Barcode"
+                          checked={syncOptions.barcode}
+                          onChange={(event) =>
+                            setSyncOptions((previous) => ({
+                              ...previous,
+                              barcode: event.currentTarget.checked,
+                            }))
+                          }
+                        ></s-checkbox>
+                        <s-checkbox
+                          label="Images"
+                          checked={syncOptions.images}
+                          onChange={(event) =>
+                            setSyncOptions((previous) => ({
+                              ...previous,
+                              images: event.currentTarget.checked,
+                            }))
+                          }
+                        ></s-checkbox>
+                        <s-checkbox
+                          label="Vendor"
+                          checked={syncOptions.vendor}
+                          onChange={(event) =>
+                            setSyncOptions((previous) => ({
+                              ...previous,
+                              vendor: event.currentTarget.checked,
+                            }))
+                          }
+                        ></s-checkbox>
+                        <s-checkbox
+                          label="Continue Selling Out Of Stock"
+                          checked={syncOptions.continueSellingOutOfStock}
+                          onChange={(event) =>
+                            setSyncOptions((previous) => ({
+                              ...previous,
+                              continueSellingOutOfStock: event.currentTarget.checked,
+                            }))
+                          }
+                        ></s-checkbox>
+                      </div>
+                      {syncOptions.images && selectedProductImages.length > 0 ? (
+                        <div style={{ marginTop: "6px" }}>
+                          <label htmlFor="firstImageSelect">First image in target store</label>
+                          <select
+                            id="firstImageSelect"
+                            value={firstImageId}
+                            onChange={(event) => setFirstImageId(event.currentTarget.value)}
+                            style={{
+                              width: "100%",
+                              padding: "10px",
+                              borderRadius: "8px",
+                              border: "1px solid #d1d5db",
+                              background: "#ffffff",
+                            }}
+                          >
+                            {selectedProductImages.map((image, index) => (
+                              <option key={image.id} value={image.id}>
+                                {index + 1}. {image.altText || image.url}
+                              </option>
+                            ))}
+                          </select>
+                        </div>
+                      ) : null}
+                    </s-stack>
+                  </s-box>
                 </s-stack>
 
-                <s-stack direction="inline" gap="base">
+                <s-stack direction="inline" gap="base" style={{ marginTop: "16px", justifyContent: "flex-end" }}>
                   <s-button type="button" onClick={closeSyncModal} disabled={isSyncing}>
                     Cancel
                   </s-button>
                   <s-button
                     type="submit"
-                    disabled={selectedTargetShops.length === 0}
+                    disabled={selectedTargetShops.length === 0 || selectedFieldValues.length === 0}
                     {...(isSyncing ? { loading: true } : {})}
                   >
-                    Sync selected fields
+                    Start sync
                   </s-button>
                 </s-stack>
               </syncFetcher.Form>
