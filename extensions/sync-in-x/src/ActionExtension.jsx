@@ -6,8 +6,11 @@ export default async () => {
   render(<Extension />, document.body);
 }
 
-function buildEmbeddedAppHref(launchUrl, productId) {
-  const query = productId ? `?openSyncProductId=${encodeURIComponent(productId)}` : '';
+function buildEmbeddedAppHref(launchUrl, productIds) {
+  const normalizedIds = [...new Set((productIds || []).map((id) => String(id || '').trim()).filter(Boolean))];
+  const query = normalizedIds.length > 0
+    ? `?openSyncProductIds=${encodeURIComponent(normalizedIds.join(','))}`
+    : '';
 
   try {
     const parsedLaunchUrl = new URL(String(launchUrl));
@@ -31,8 +34,9 @@ function Extension() {
   const {i18n, close, data, intents, extension: {target}} = shopify;
   console.log({data});
   const [productTitle, setProductTitle] = useState('');
-  const selectedProductId = data?.selected?.[0]?.id || '';
-  const appSyncModalHref = buildEmbeddedAppHref(intents?.launchUrl, selectedProductId);
+  const selectedProductIds = (data?.selected || []).map((entry) => entry?.id).filter(Boolean);
+  const selectedProductId = selectedProductIds[0] || '';
+  const appSyncModalHref = buildEmbeddedAppHref(intents?.launchUrl, selectedProductIds);
   // Use direct API calls to fetch data from Shopify.
   // See https://shopify.dev/docs/api/admin-graphql for more information about Shopify's GraphQL API
   useEffect(() => {
@@ -70,9 +74,13 @@ function Extension() {
       <s-stack direction="block">
         {/* Set the translation values for each supported language in the locales directory */}
         <s-text type="strong">{i18n.translate('welcome', {target})}</s-text>
-        <s-text>Current product: {productTitle}</s-text>
+        <s-text>
+          {selectedProductIds.length > 1
+            ? `Selected products: ${selectedProductIds.length}`
+            : `Current product: ${productTitle}`}
+        </s-text>
         <s-text tone="neutral">
-          Open the app sync modal for this product.
+          Open the app sync modal for the selected product set.
         </s-text>
       </s-stack>
       <s-button slot="primary-action" href={appSyncModalHref} target="_top">

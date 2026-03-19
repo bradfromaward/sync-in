@@ -44,6 +44,14 @@ export const loader = async ({ request }) => {
   const url = new URL(request.url);
   const searchQuery = (url.searchParams.get("q") || "").trim();
   const openSyncProductId = (url.searchParams.get("openSyncProductId") || "").trim();
+  const openSyncProductIds = [
+    ...new Set(
+      String(url.searchParams.get("openSyncProductIds") || "")
+        .split(",")
+        .map((id) => id.trim())
+        .filter(Boolean),
+    ),
+  ];
 
   const connectedStoreSessions = await db.session.findMany({
     where: {
@@ -115,38 +123,45 @@ export const loader = async ({ request }) => {
   );
   const productsJson = await productsResponse.json();
   const products = productsJson.data?.products?.nodes ?? [];
-  let openSyncProduct = null;
+  const requestedOpenIds = openSyncProductIds.length > 0
+    ? openSyncProductIds
+    : openSyncProductId
+      ? [openSyncProductId]
+      : [];
+  let openSyncProducts = [];
 
-  if (openSyncProductId) {
-    const openProductResponse = await sourceAdmin.graphql(
+  if (requestedOpenIds.length > 0) {
+    const openProductsResponse = await sourceAdmin.graphql(
       `#graphql
-        query OpenSyncProduct($id: ID!) {
-          product(id: $id) {
-            id
-            title
-            status
-            vendor
-            productType
-            featuredImage {
-              url
-              altText
-            }
-            images(first: 10) {
-              nodes {
-                id
+        query OpenSyncProducts($ids: [ID!]!) {
+          nodes(ids: $ids) {
+            ... on Product {
+              id
+              title
+              status
+              vendor
+              productType
+              featuredImage {
                 url
                 altText
               }
-            }
-            variants(first: 1) {
-              nodes {
-                id
-                sku
-                barcode
-                inventoryPolicy
-                inventoryItem {
+              images(first: 10) {
+                nodes {
+                  id
+                  url
+                  altText
+                }
+              }
+              variants(first: 1) {
+                nodes {
                   id
                   sku
+                  barcode
+                  inventoryPolicy
+                  inventoryItem {
+                    id
+                    sku
+                  }
                 }
               }
             }
@@ -154,12 +169,17 @@ export const loader = async ({ request }) => {
         }`,
       {
         variables: {
-          id: openSyncProductId,
+          ids: requestedOpenIds,
         },
       },
     );
-    const openProductJson = await openProductResponse.json();
-    openSyncProduct = openProductJson.data?.product ?? null;
+    const openProductsJson = await openProductsResponse.json();
+    const openProductMap = new Map(
+      (openProductsJson.data?.nodes ?? [])
+        .filter(Boolean)
+        .map((product) => [product.id, product]),
+    );
+    openSyncProducts = requestedOpenIds.map((id) => openProductMap.get(id)).filter(Boolean);
   }
 
   return {
@@ -167,8 +187,8 @@ export const loader = async ({ request }) => {
     sourceShop,
     searchQuery,
     products,
-    openSyncProductId,
-    openSyncProduct,
+    openSyncProductIds: requestedOpenIds,
+    openSyncProducts,
     connectedStores,
     availableSourceStores,
   };
@@ -205,7 +225,16 @@ export const action = async ({ request }) => {
   }
 
   if (intent === "sync-product") {
-    const productId = String(formData.get("productId") || "").trim();
+    const productIds = [
+      ...new Set(
+        [
+          ...formData.getAll("productIds"),
+          formData.get("productId"),
+        ]
+          .map((id) => String(id || "").trim())
+          .filter(Boolean),
+      ),
+    ];
     const targetShops = [
       ...new Set(
         formData
@@ -220,10 +249,10 @@ export const action = async ({ request }) => {
     const selectedFields = new Set(formData.getAll("fields").map((field) => String(field)));
     const firstImageId = String(formData.get("firstImageId") || "").trim();
 
-    if (!productId || targetShops.length === 0 || !sourceShop) {
+    if (productIds.length === 0 || targetShops.length === 0 || !sourceShop) {
       return {
         ok: false,
-        message: "Pick one or more target stores and a product before syncing.",
+        message: "Pick one or more target stores and products before syncing.",
       };
     }
 
@@ -265,103 +294,101 @@ export const action = async ({ request }) => {
         ? admin
         : (await unauthenticated.admin(sourceShop)).admin;
 
-    const sourceProductResponse = await sourceAdmin.graphql(
-      `#graphql
-        query SourceProduct($id: ID!) {
-          product(id: $id) {
-            id
-            title
-            descriptionHtml
-            vendor
-            images(first: 10) {
-              nodes {
-                id
-                url
-                altText
+    const syncOneProduct = async (productId) => {
+      const sourceProductResponse = await sourceAdmin.graphql(
+        `#graphql
+          query SourceProduct($id: ID!) {
+            product(id: $id) {
+              id
+              title
+              descriptionHtml
+              vendor
+              images(first: 10) {
+                nodes {
+                  id
+                  url
+                  altText
+                }
               }
-            }
-            variants(first: 1) {
-              nodes {
-                id
-                sku
-                barcode
-                inventoryPolicy
-                inventoryItem {
+              variants(first: 1) {
+                nodes {
                   id
                   sku
+                  barcode
+                  inventoryPolicy
+                  inventoryItem {
+                    id
+                    sku
+                  }
                 }
               }
             }
-          }
-        }`,
-      {
-        variables: {
-          id: productId,
+          }`,
+        {
+          variables: {
+            id: productId,
+          },
         },
-      },
-    );
-    const sourceProductJson = await sourceProductResponse.json();
-    const sourceProduct = sourceProductJson.data?.product;
+      );
+      const sourceProductJson = await sourceProductResponse.json();
+      const sourceProduct = sourceProductJson.data?.product;
 
-    if (!sourceProduct) {
-      return {
-        ok: false,
-        message: "Could not load that source product.",
-      };
-    }
-
-    const sourceImages = sourceProduct.images?.nodes ?? [];
-    let orderedImages = sourceImages;
-    if (firstImageId && sourceImages.length > 1) {
-      const firstImage = sourceImages.find((image) => image.id === firstImageId);
-      if (firstImage) {
-        orderedImages = [
-          firstImage,
-          ...sourceImages.filter((image) => image.id !== firstImage.id),
-        ];
+      if (!sourceProduct) {
+        return {
+          ok: false,
+          label: productId,
+          reason: "could not load source product",
+          updatedShops: [],
+          failedShops: [],
+          variantWarningShops: [],
+        };
       }
-    }
 
-    const sourceVariant = sourceProduct.variants?.nodes?.[0] ?? null;
-    const productInput = {
-      title: sourceProduct.title,
-    };
-    if (selectedFields.has("description")) {
-      productInput.descriptionHtml = sourceProduct.descriptionHtml;
-    }
-    if (selectedFields.has("vendor")) {
-      productInput.vendor = sourceProduct.vendor;
-    }
+      const sourceImages = sourceProduct.images?.nodes ?? [];
+      let orderedImages = sourceImages;
+      if (firstImageId && sourceImages.length > 1) {
+        const firstImage = sourceImages.find((image) => image.id === firstImageId);
+        if (firstImage) {
+          orderedImages = [
+            firstImage,
+            ...sourceImages.filter((image) => image.id !== firstImage.id),
+          ];
+        }
+      }
 
-    const mediaInput = selectedFields.has("images")
-      ? orderedImages.map((image) => ({
-          mediaContentType: "IMAGE",
-          originalSource: image.url,
-          alt: image.altText || sourceProduct.title,
-        }))
-      : [];
+      const sourceVariant = sourceProduct.variants?.nodes?.[0] ?? null;
+      const mediaInput = selectedFields.has("images")
+        ? orderedImages.map((image) => ({
+            mediaContentType: "IMAGE",
+            originalSource: image.url,
+            alt: image.altText || sourceProduct.title,
+          }))
+        : [];
 
-    const updatedShops = [];
-    const failedShops = [];
-    const variantWarningShops = [];
-    const sourceSku = (sourceVariant?.sku || "").trim();
+      const updatedShops = [];
+      const failedShops = [];
+      const variantWarningShops = [];
+      const sourceSku = (sourceVariant?.sku || "").trim();
 
-    if (!sourceSku) {
-      return {
-        ok: false,
-        message: "Source product has no SKU. SKU is required to match existing products.",
-      };
-    }
+      if (!sourceSku) {
+        return {
+          ok: false,
+          label: sourceProduct.title,
+          reason: "source product has no SKU",
+          updatedShops,
+          failedShops,
+          variantWarningShops,
+        };
+      }
 
-    for (const targetShop of targetShops) {
-      const targetAdmin =
-        targetShop === session.shop
-          ? admin
-          : (await unauthenticated.admin(targetShop)).admin;
-      let targetProductId = null;
-      let targetVariantId = null;
+      for (const targetShop of targetShops) {
+        const targetAdmin =
+          targetShop === session.shop
+            ? admin
+            : (await unauthenticated.admin(targetShop)).admin;
+        let targetProductId = null;
+        let targetVariantId = null;
 
-      if (sourceSku) {
         const lookupResponse = await targetAdmin.graphql(
           `#graphql
             query FindBySku($query: String!) {
@@ -384,124 +411,28 @@ export const action = async ({ request }) => {
         const existingVariant = lookupJson.data?.productVariants?.nodes?.[0] ?? null;
         targetProductId = existingVariant?.product?.id ?? null;
         targetVariantId = existingVariant?.id ?? null;
-      }
 
-      if (targetProductId) {
-        const productUpdateInput = { id: targetProductId };
+        if (targetProductId) {
+          const productUpdateInput = { id: targetProductId };
 
-        if (selectedFields.has("title")) {
-          productUpdateInput.title = sourceProduct.title;
-        }
-        if (selectedFields.has("description")) {
-          productUpdateInput.descriptionHtml = sourceProduct.descriptionHtml;
-        }
-        if (selectedFields.has("vendor")) {
-          productUpdateInput.vendor = sourceProduct.vendor;
-        }
-
-        if (Object.keys(productUpdateInput).length > 1) {
-          const productUpdateResponse = await targetAdmin.graphql(
-            `#graphql
-              mutation SyncExistingProduct($product: ProductUpdateInput!) {
-                productUpdate(product: $product) {
-                  product {
-                    id
-                  }
-                  userErrors {
-                    field
-                    message
-                  }
-                }
-              }`,
-            {
-              variables: {
-                product: productUpdateInput,
-              },
-            },
-          );
-          const productUpdateJson = await productUpdateResponse.json();
-          const updateErrors = productUpdateJson.data?.productUpdate?.userErrors ?? [];
-          if (updateErrors.length > 0) {
-            failedShops.push(`${targetShop} (${updateErrors[0].message})`);
-            continue;
+          if (selectedFields.has("title")) {
+            productUpdateInput.title = sourceProduct.title;
           }
-        }
-
-        if (selectedFields.has("images") && mediaInput.length > 0) {
-          const mediaResponse = await targetAdmin.graphql(
-            `#graphql
-              mutation AddImagesToExistingProduct($productId: ID!, $media: [CreateMediaInput!]!) {
-                productCreateMedia(productId: $productId, media: $media) {
-                  mediaUserErrors {
-                    field
-                    message
-                  }
-                }
-              }`,
-            {
-              variables: {
-                productId: targetProductId,
-                media: mediaInput,
-              },
-            },
-          );
-          const mediaJson = await mediaResponse.json();
-          const mediaErrors = mediaJson.data?.productCreateMedia?.mediaUserErrors ?? [];
-          if (mediaErrors.length > 0) {
-            variantWarningShops.push(`${targetShop} (image update failed: ${mediaErrors[0].message})`);
+          if (selectedFields.has("description")) {
+            productUpdateInput.descriptionHtml = sourceProduct.descriptionHtml;
           }
-        }
-
-        updatedShops.push(targetShop);
-      } else {
-        failedShops.push(`${targetShop} (no product found with SKU "${sourceSku}")`);
-        continue;
-      }
-
-      const shouldSyncVariantFields =
-        selectedFields.has("barcode") ||
-        selectedFields.has("continue-selling-out-of-stock");
-
-      if (shouldSyncVariantFields && targetVariantId && sourceVariant) {
-        const baseVariantInput = {
-          id: targetVariantId,
-        };
-        if (selectedFields.has("continue-selling-out-of-stock")) {
-          baseVariantInput.inventoryPolicy =
-            sourceVariant.inventoryPolicy === "CONTINUE" ? "CONTINUE" : "DENY";
-        }
-
-        const attempts = [];
-        const barcodeValue = sourceVariant.barcode ?? "";
-        const wantsBarcode = selectedFields.has("barcode");
-
-        const topLevelBarcodeInput = { ...baseVariantInput };
-        if (wantsBarcode) {
-          topLevelBarcodeInput.barcode = barcodeValue;
-        }
-        attempts.push(topLevelBarcodeInput);
-
-        if (wantsBarcode) {
-          const nestedInventoryInput = { ...baseVariantInput, inventoryItem: {} };
-          if (wantsBarcode) {
-            nestedInventoryInput.inventoryItem.barcode = barcodeValue;
-          }
-          attempts.push(nestedInventoryInput);
-        }
-
-        let variantUpdated = false;
-        let lastVariantError = "";
-
-        for (const variantAttemptInput of attempts) {
-          if (Object.keys(variantAttemptInput).length <= 1) {
-            continue;
+          if (selectedFields.has("vendor")) {
+            productUpdateInput.vendor = sourceProduct.vendor;
           }
 
-          try {
-            const updateVariantResponse = await targetAdmin.graphql(
+          if (Object.keys(productUpdateInput).length > 1) {
+            const productUpdateResponse = await targetAdmin.graphql(
               `#graphql
-                mutation UpdateSyncedVariant($productId: ID!, $variants: [ProductVariantsBulkInput!]!) {
-                  productVariantsBulkUpdate(productId: $productId, variants: $variants) {
+                mutation SyncExistingProduct($product: ProductUpdateInput!) {
+                  productUpdate(product: $product) {
+                    product {
+                      id
+                    }
                     userErrors {
                       field
                       message
@@ -510,60 +441,189 @@ export const action = async ({ request }) => {
                 }`,
               {
                 variables: {
-                  productId: targetProductId,
-                  variants: [variantAttemptInput],
+                  product: productUpdateInput,
                 },
               },
             );
-            const updateVariantJson = await updateVariantResponse.json();
-            const queryErrors = updateVariantJson.errors ?? [];
-            const variantErrors =
-              updateVariantJson.data?.productVariantsBulkUpdate?.userErrors ?? [];
+            const productUpdateJson = await productUpdateResponse.json();
+            const updateErrors = productUpdateJson.data?.productUpdate?.userErrors ?? [];
+            if (updateErrors.length > 0) {
+              failedShops.push(`${targetShop} (${updateErrors[0].message})`);
+              continue;
+            }
+          }
 
-            if (queryErrors.length === 0 && variantErrors.length === 0) {
-              variantUpdated = true;
-              break;
+          if (selectedFields.has("images") && mediaInput.length > 0) {
+            const mediaResponse = await targetAdmin.graphql(
+              `#graphql
+                mutation AddImagesToExistingProduct($productId: ID!, $media: [CreateMediaInput!]!) {
+                  productCreateMedia(productId: $productId, media: $media) {
+                    mediaUserErrors {
+                      field
+                      message
+                    }
+                  }
+                }`,
+              {
+                variables: {
+                  productId: targetProductId,
+                  media: mediaInput,
+                },
+              },
+            );
+            const mediaJson = await mediaResponse.json();
+            const mediaErrors = mediaJson.data?.productCreateMedia?.mediaUserErrors ?? [];
+            if (mediaErrors.length > 0) {
+              variantWarningShops.push(
+                `${targetShop} (image update failed: ${mediaErrors[0].message})`,
+              );
+            }
+          }
+
+          updatedShops.push(targetShop);
+        } else {
+          failedShops.push(`${targetShop} (no product found with SKU "${sourceSku}")`);
+          continue;
+        }
+
+        const shouldSyncVariantFields =
+          selectedFields.has("barcode") ||
+          selectedFields.has("continue-selling-out-of-stock");
+
+        if (shouldSyncVariantFields && targetVariantId && sourceVariant) {
+          const baseVariantInput = {
+            id: targetVariantId,
+          };
+          if (selectedFields.has("continue-selling-out-of-stock")) {
+            baseVariantInput.inventoryPolicy =
+              sourceVariant.inventoryPolicy === "CONTINUE" ? "CONTINUE" : "DENY";
+          }
+
+          const attempts = [];
+          const barcodeValue = sourceVariant.barcode ?? "";
+          const wantsBarcode = selectedFields.has("barcode");
+
+          const topLevelBarcodeInput = { ...baseVariantInput };
+          if (wantsBarcode) {
+            topLevelBarcodeInput.barcode = barcodeValue;
+          }
+          attempts.push(topLevelBarcodeInput);
+
+          if (wantsBarcode) {
+            const nestedInventoryInput = { ...baseVariantInput, inventoryItem: {} };
+            nestedInventoryInput.inventoryItem.barcode = barcodeValue;
+            attempts.push(nestedInventoryInput);
+          }
+
+          let variantUpdated = false;
+          let lastVariantError = "";
+
+          for (const variantAttemptInput of attempts) {
+            if (Object.keys(variantAttemptInput).length <= 1) {
+              continue;
             }
 
-            lastVariantError =
-              variantErrors[0]?.message || queryErrors[0]?.message || "unknown variant update error";
-          } catch (error) {
-            lastVariantError = error?.message || "unknown variant update error";
+            try {
+              const updateVariantResponse = await targetAdmin.graphql(
+                `#graphql
+                  mutation UpdateSyncedVariant($productId: ID!, $variants: [ProductVariantsBulkInput!]!) {
+                    productVariantsBulkUpdate(productId: $productId, variants: $variants) {
+                      userErrors {
+                        field
+                        message
+                      }
+                    }
+                  }`,
+                {
+                  variables: {
+                    productId: targetProductId,
+                    variants: [variantAttemptInput],
+                  },
+                },
+              );
+              const updateVariantJson = await updateVariantResponse.json();
+              const queryErrors = updateVariantJson.errors ?? [];
+              const variantErrors =
+                updateVariantJson.data?.productVariantsBulkUpdate?.userErrors ?? [];
+
+              if (queryErrors.length === 0 && variantErrors.length === 0) {
+                variantUpdated = true;
+                break;
+              }
+
+              lastVariantError =
+                variantErrors[0]?.message ||
+                queryErrors[0]?.message ||
+                "unknown variant update error";
+            } catch (error) {
+              lastVariantError = error?.message || "unknown variant update error";
+            }
+          }
+
+          if (!variantUpdated && lastVariantError) {
+            variantWarningShops.push(`${targetShop} (${lastVariantError})`);
           }
         }
+      }
 
-        if (!variantUpdated && lastVariantError) {
-          variantWarningShops.push(`${targetShop} (${lastVariantError})`);
-        }
+      return {
+        ok: updatedShops.length > 0,
+        label: sourceProduct.title,
+        reason:
+          updatedShops.length > 0
+            ? ""
+            : failedShops.length > 0
+              ? failedShops.join(", ")
+              : "no matched stores were updated",
+        updatedShops,
+        failedShops,
+        variantWarningShops,
+      };
+    };
+
+    const syncedProducts = [];
+    const failedProducts = [];
+    const warnings = [];
+    let totalStoreUpdates = 0;
+
+    for (const productId of productIds) {
+      const result = await syncOneProduct(productId);
+      if (result.ok) {
+        syncedProducts.push(result.label);
+        totalStoreUpdates += result.updatedShops.length;
+      } else {
+        failedProducts.push(`${result.label} (${result.reason})`);
+      }
+
+      if (result.variantWarningShops.length > 0) {
+        warnings.push(
+          `${result.label}: ${result.variantWarningShops.join(", ")}`,
+        );
       }
     }
 
-    if (updatedShops.length === 0) {
+    if (syncedProducts.length === 0) {
       return {
         ok: false,
-        message: `Sync failed. ${failedShops.join(", ")}`,
+        message: `Sync failed for all selected products. ${failedProducts.join(" | ")}`,
       };
     }
 
     const messageParts = [
-      `Synced "${sourceProduct.title}" to ${updatedShops.length} matched store(s).`,
+      `Synced ${syncedProducts.length} product(s) across ${totalStoreUpdates} matched store update(s).`,
     ];
-    if (updatedShops.length > 0) {
-      messageParts.push(`Updated by SKU match: ${updatedShops.join(", ")}.`);
+    if (syncedProducts.length <= 5) {
+      messageParts.push(`Products: ${syncedProducts.join(", ")}.`);
     }
-
-    if (variantWarningShops.length > 0) {
-      messageParts.push(
-        `Some variant fields could not be updated: ${variantWarningShops.join(", ")}.`,
-      );
+    if (warnings.length > 0) {
+      messageParts.push(`Some variant/image updates had warnings: ${warnings.join(" | ")}.`);
     }
-
-    if (failedShops.length > 0) {
-      messageParts.push(`Failed stores: ${failedShops.join(", ")}.`);
+    if (failedProducts.length > 0) {
+      messageParts.push(`Failed products: ${failedProducts.join(" | ")}.`);
     }
 
     return {
-      ok: updatedShops.length > 0,
+      ok: true,
       message: messageParts.join(" "),
     };
   }
@@ -618,16 +678,17 @@ export default function Index() {
     sourceShop,
     searchQuery,
     products,
-    openSyncProductId,
-    openSyncProduct,
+    openSyncProductIds,
+    openSyncProducts,
     connectedStores,
     availableSourceStores,
   } = useLoaderData();
   const syncFetcher = useFetcher();
   const disconnectFetcher = useFetcher();
   const shopify = useAppBridge();
-  const [syncModalProduct, setSyncModalProduct] = useState(null);
-  const [hasHandledOpenSyncParam, setHasHandledOpenSyncParam] = useState(false);
+  const [syncModalProducts, setSyncModalProducts] = useState([]);
+  const [selectedProductIds, setSelectedProductIds] = useState([]);
+  const [hasHandledOpenSyncParams, setHasHandledOpenSyncParams] = useState(false);
   const [syncOptions, setSyncOptions] = useState({
     title: true,
     description: true,
@@ -646,6 +707,8 @@ export default function Index() {
       ? String(disconnectFetcher.formData.get("shop") || "")
       : "";
   const hasConnectedStores = connectedStores.length > 0;
+  const isBulkSyncMode = syncModalProducts.length > 1;
+  const syncModalProduct = syncModalProducts[0] || null;
   const availableTargetStores = useMemo(
     () =>
       [currentShop, ...connectedStores].filter((shopDomain) => shopDomain !== sourceShop),
@@ -660,21 +723,22 @@ export default function Index() {
   }, [availableTargetStores]);
 
   useEffect(() => {
-    setHasHandledOpenSyncParam(false);
-  }, [openSyncProductId, sourceShop]);
+    setHasHandledOpenSyncParams(false);
+  }, [openSyncProductIds, sourceShop]);
 
   useEffect(() => {
-    if (!openSyncProductId || hasHandledOpenSyncParam) {
+    if (openSyncProductIds.length === 0 || hasHandledOpenSyncParams) {
       return;
     }
 
-    setHasHandledOpenSyncParam(true);
+    setHasHandledOpenSyncParams(true);
 
-    if (!openSyncProduct) {
+    if (!openSyncProducts || openSyncProducts.length === 0) {
       return;
     }
 
-    setSyncModalProduct(openSyncProduct);
+    setSyncModalProducts(openSyncProducts);
+    setSelectedProductIds(openSyncProducts.map((product) => product.id));
     setSyncOptions({
       title: true,
       description: true,
@@ -683,7 +747,7 @@ export default function Index() {
       vendor: true,
       continueSellingOutOfStock: true,
     });
-    setFirstImageId(openSyncProduct.images?.nodes?.[0]?.id || "");
+    setFirstImageId(openSyncProducts[0]?.images?.nodes?.[0]?.id || "");
     setSelectedTargetShops((previous) => {
       if (previous.length > 0) {
         const preserved = previous.filter((shop) => availableTargetStores.includes(shop));
@@ -691,7 +755,7 @@ export default function Index() {
       }
       return [...availableTargetStores];
     });
-  }, [availableTargetStores, hasHandledOpenSyncParam, openSyncProduct, openSyncProductId]);
+  }, [availableTargetStores, hasHandledOpenSyncParams, openSyncProductIds, openSyncProducts]);
 
   useEffect(() => {
     if (syncFetcher.data?.message) {
@@ -701,7 +765,8 @@ export default function Index() {
 
   useEffect(() => {
     if (syncFetcher.data?.ok) {
-      setSyncModalProduct(null);
+      setSyncModalProducts([]);
+      setSelectedProductIds([]);
     }
   }, [syncFetcher.data?.ok]);
 
@@ -724,7 +789,8 @@ export default function Index() {
   }, [products, searchQuery]);
 
   const openSyncModal = (product) => {
-    setSyncModalProduct(product);
+    setSyncModalProducts([product]);
+    setSelectedProductIds([product.id]);
     setSyncOptions({
       title: true,
       description: true,
@@ -743,12 +809,37 @@ export default function Index() {
     });
   };
 
-  const closeSyncModal = () => {
-    if (isSyncing) return;
-    setSyncModalProduct(null);
+  const openBulkSyncModal = () => {
+    const selectedProducts = products.filter((product) => selectedProductIds.includes(product.id));
+    if (selectedProducts.length === 0) {
+      return;
+    }
+
+    setSyncModalProducts(selectedProducts);
+    setSyncOptions({
+      title: true,
+      description: true,
+      barcode: true,
+      images: true,
+      vendor: true,
+      continueSellingOutOfStock: true,
+    });
+    setFirstImageId("");
+    setSelectedTargetShops((previous) => {
+      if (previous.length > 0) {
+        const preserved = previous.filter((shop) => availableTargetStores.includes(shop));
+        if (preserved.length > 0) return preserved;
+      }
+      return [...availableTargetStores];
+    });
   };
 
-  const selectedProductImages = syncModalProduct?.images?.nodes ?? [];
+  const closeSyncModal = () => {
+    if (isSyncing) return;
+    setSyncModalProducts([]);
+  };
+
+  const selectedProductImages = !isBulkSyncMode ? syncModalProduct?.images?.nodes ?? [] : [];
 
   return (
     <s-page heading="Store sync">
@@ -844,8 +935,19 @@ export default function Index() {
           <s-paragraph>{emptySearchState}</s-paragraph>
         ) : (
           <s-stack gap="base">
+            <s-stack direction="inline" gap="base" alignItems="center">
+              <s-text tone="subdued">{selectedProductIds.length} product(s) selected.</s-text>
+              <s-button
+                type="button"
+                disabled={selectedProductIds.length === 0 || availableTargetStores.length === 0}
+                onClick={openBulkSyncModal}
+              >
+                Sync selected products
+              </s-button>
+            </s-stack>
             {products.map((product) => {
               const sku = product.variants?.nodes?.[0]?.sku || "N/A";
+              const isSelected = selectedProductIds.includes(product.id);
               return (
                 <s-box
                   key={product.id}
@@ -854,6 +956,24 @@ export default function Index() {
                   borderRadius="base"
                 >
                   <s-stack direction="inline" gap="base" alignItems="center">
+                    <div style={{ display: "inline-flex", alignItems: "center" }}>
+                      <input
+                        type="checkbox"
+                        aria-label={`Select ${product.title}`}
+                        checked={isSelected}
+                        onChange={(event) => {
+                          const checked = event.currentTarget.checked;
+                          setSelectedProductIds((previous) => {
+                            if (checked) {
+                              return previous.includes(product.id)
+                                ? previous
+                                : [...previous, product.id];
+                            }
+                            return previous.filter((id) => id !== product.id);
+                          });
+                        }}
+                      />
+                    </div>
                     {product.featuredImage?.url ? (
                       <img
                         src={product.featuredImage.url}
@@ -919,7 +1039,7 @@ export default function Index() {
         )}
       </s-section>
 
-      {syncModalProduct && (
+      {syncModalProducts.length > 0 && (
         <div
           role="dialog"
           aria-modal="true"
@@ -949,12 +1069,16 @@ export default function Index() {
             <s-stack gap="base">
               <s-text variant="headingMd">Select fields to sync</s-text>
               <s-text tone="subdued">
-                Product: {syncModalProduct.title}
+                {isBulkSyncMode
+                  ? `Products selected: ${syncModalProducts.length}`
+                  : `Product: ${syncModalProduct?.title || ""}`}
               </s-text>
 
               <syncFetcher.Form method="post">
                 <input type="hidden" name="intent" value="sync-product" />
-                <input type="hidden" name="productId" value={syncModalProduct.id} />
+                {syncModalProducts.map((product) => (
+                  <input key={product.id} type="hidden" name="productIds" value={product.id} />
+                ))}
                 <input type="hidden" name="sourceShop" value={sourceShop} />
                 {selectedTargetShops.map((shopDomain) => (
                   <input
@@ -964,7 +1088,9 @@ export default function Index() {
                     value={shopDomain}
                   />
                 ))}
-                {firstImageId ? <input type="hidden" name="firstImageId" value={firstImageId} /> : null}
+                {!isBulkSyncMode && firstImageId ? (
+                  <input type="hidden" name="firstImageId" value={firstImageId} />
+                ) : null}
 
                 <s-stack gap="tight">
                   <div>
