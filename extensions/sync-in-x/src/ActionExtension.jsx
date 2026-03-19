@@ -6,14 +6,33 @@ export default async () => {
   render(<Extension />, document.body);
 }
 
+function buildEmbeddedAppHref(launchUrl, productId) {
+  const query = productId ? `?openSyncProductId=${encodeURIComponent(productId)}` : '';
+
+  try {
+    const parsedLaunchUrl = new URL(String(launchUrl));
+    const pathParts = parsedLaunchUrl.pathname.split('/').filter(Boolean);
+
+    if (pathParts[0] === 'store' && pathParts[1]) {
+      return `${parsedLaunchUrl.origin}/store/${pathParts[1]}/apps/sync-in/app${query}`;
+    }
+
+    if (pathParts[0] === 'admin') {
+      return `${parsedLaunchUrl.origin}/admin/apps/sync-in/app${query}`;
+    }
+  } catch (error) {
+    console.error('Could not parse launch URL:', error);
+  }
+
+  return `/apps/sync-in/app${query}`;
+}
+
 function Extension() {
-  const {i18n, close, data, extension: {target}} = shopify;
+  const {i18n, close, data, intents, extension: {target}} = shopify;
   console.log({data});
   const [productTitle, setProductTitle] = useState('');
   const selectedProductId = data?.selected?.[0]?.id || '';
-  const appSyncModalHref = selectedProductId
-    ? `/app?openSyncProductId=${encodeURIComponent(selectedProductId)}`
-    : '/app';
+  const appSyncModalHref = buildEmbeddedAppHref(intents?.launchUrl, selectedProductId);
   // Use direct API calls to fetch data from Shopify.
   // See https://shopify.dev/docs/api/admin-graphql for more information about Shopify's GraphQL API
   useEffect(() => {
